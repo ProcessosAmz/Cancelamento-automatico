@@ -1,1 +1,6 @@
 .env
+keys.env
+token_cache.json
+saidas/
+*.xlsx
+__pycache__/

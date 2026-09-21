@@ -21,10 +21,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SAIDAS_DIR = os.path.join(HERE, "saidas")
 
 
-def buscar_telefone(keys, id_cliente):
-    q = '{ clienteById(id_cliente: "%s") { telefone_primario telefone_secundario } }' % id_cliente
+def buscar_telefone(keys, nome_cliente):
+    """A consulta do Metabase (desde 21/09/2026) nao traz mais id_cliente,
+    entao buscamos o telefone pelo nome/razao social exato. Se der 0 ou mais
+    de 1 resultado (nome ambiguo/duplicado), retorna vazio - o chamador
+    trata isso como "cliente sem telefone cadastrado"."""
+    q = (
+        '{ clienteByNomeRazaoSocial(nome_razaosocial: "%s", first: 5) '
+        "{ data { telefone_primario telefone_secundario } } }" % nome_cliente.replace('"', "'")
+    )
     data = h.gql_call(keys, q)
-    c = data.get("clienteById") or {}
+    candidatos = (data.get("clienteByNomeRazaoSocial") or {}).get("data") or []
+    if len(candidatos) != 1:
+        return ""
+    c = candidatos[0]
     return c.get("telefone_primario") or c.get("telefone_secundario") or ""
 
 
@@ -51,7 +61,7 @@ def executar_um(keys, row):
         "plano": row.get("plano"),
     }
     try:
-        telefone = buscar_telefone(keys, row.get("id_cliente"))
+        telefone = buscar_telefone(keys, row.get("cliente"))
         if not telefone:
             resultado.update(ok=False, http_status=None, erro="cliente sem telefone cadastrado")
             return resultado

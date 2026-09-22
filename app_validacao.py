@@ -163,7 +163,7 @@ else:
                 f"[{i}/{total}] {plano_execucao['cliente']} - {plano_execucao['plano']} "
                 f"(servico {plano_execucao['id_cliente_servico']})"
             )
-            with log_area.status(titulo, state="complete"):
+            with log_area.status(titulo, state="complete", expanded=True):
                 st.markdown(
                     f"**1. Apagar faturas vencidas:** {acoes['apagar_faturas_vencidas']['qtd']} "
                     f"fatura(s) - IDs: {acoes['apagar_faturas_vencidas']['ids_fatura']}"

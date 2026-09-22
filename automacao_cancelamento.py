@@ -53,8 +53,10 @@ FILA_AGENDAMENTO = "FILA_AMZ_AGENDAMENTO"
 
 def parse_ids_fatura(raw):
     """ids_faturas_deletar vem do Metabase como array do Postgres em texto,
-    ex: '{10096702,10225474}'."""
-    if not raw:
+    ex: '{10096702,10225474}'. Pode vir None, string vazia, ou NaN do pandas
+    (quando o valor e nulo no JSON e a coluna do DataFrame vira float - NaN
+    e "truthy" em Python, entao precisa de um cheque a parte)."""
+    if not raw or (isinstance(raw, float) and raw != raw):
         return []
     limpo = str(raw).strip("{}")
     if not limpo:

@@ -6,10 +6,10 @@ sem autenticacao). A consulta ja vem com 1 linha por id_cliente_servico
 suspensao por debito - confirmado em 21/09/2026 (menor "dias suspenso"
 encontrado na base = 75).
 
-Colunas de origem confirmadas na consulta (21/09/2026): cliente, plano,
-cidade, estado, tipo_pessoa, valor_mensal, classificacao_contrato,
-data_contrato_assinado, data_ultima_suspensao, id_cliente_servico,
-mes_cancelamento, qtd_faturas_total, qtd_faturas_pagas,
+Colunas de origem confirmadas na consulta (22/09/2026): cliente,
+telefone_cliente, plano, cidade, estado, tipo_pessoa, valor_mensal,
+classificacao_contrato, data_contrato_assinado, data_ultima_suspensao,
+id_cliente_servico, mes_cancelamento, qtd_faturas_total, qtd_faturas_pagas,
 qtd_faturas_vencidas_abertas, qtd_faturas_para_deletar, ids_faturas_deletar,
 valor_total_vencido_aberto, valor_total_pago, elegivel_multa,
 percentual_multa, valor_multa_estimado.
@@ -74,6 +74,7 @@ def mapeia_servico(row):
     return {
         "id_cliente_servico": row["id_cliente_servico"],
         "cliente": row["cliente"],
+        "telefone_cliente": row.get("telefone_cliente"),
         "cidade": row.get("cidade"),
         "estado": row.get("estado"),
         "tipo_pessoa": row.get("tipo_pessoa"),

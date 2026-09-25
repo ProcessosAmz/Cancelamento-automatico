@@ -50,18 +50,40 @@ DESCRICAO_RETIRADA = "RETIRAR EQUIPAMENTO EM COMODATO."
 TIPO_OS_RETIRADA = "RETIRADA DE EQUIPAMENTOS"
 FILA_AGENDAMENTO = "FILA_AMZ_AGENDAMENTO"
 
+# Combinado com Ana em 25/09/2026: qual empresa/filial usar no cancelamento
+# (campo "empresa" do endpoint de cancelamento). Desde 25/09/2026 a propria
+# consulta do Metabase ja traz "id_empresa" pronto (bate com esse
+# mapeamento: AM=114/FILIAL MAO, PA=30/FILIAL STM) - usamos o valor da
+# consulta diretamente (ver montar_plano). Mantido aqui so de referencia.
+ID_EMPRESA_POR_ESTADO = {
+    "AM": 114,  # AMAZONET TELECOMUNICACOES LTDA (FILIAL MAO)
+    "PA": 30,  # AMAZONET TELECOM (FILIAL STM)
+}
+
 
 def parse_ids_fatura(raw):
     """ids_faturas_deletar vem do Metabase como array do Postgres em texto,
-    ex: '{10096702,10225474}'. Pode vir None, string vazia, ou NaN do pandas
+    ex: '{6275826,6275826}'. Pode vir None, string vazia, NaN do pandas
     (quando o valor e nulo no JSON e a coluna do DataFrame vira float - NaN
-    e "truthy" em Python, entao precisa de um cheque a parte)."""
+    e "truthy" em Python, entao precisa de um cheque a parte), ou com o
+    literal 'NULL' dentro do array (ex: '{6275826,NULL}' - de um join sem
+    match na consulta) - ignoramos esses itens. A consulta tambem pode
+    repetir o mesmo id_fatura mais de uma vez (uma fatura pode ter varias
+    cobrancas) - removemos duplicatas aqui, preservando a ordem."""
     if not raw or (isinstance(raw, float) and raw != raw):
         return []
     limpo = str(raw).strip("{}")
     if not limpo:
         return []
-    return [int(x) for x in limpo.split(",") if x.strip()]
+    vistos = []
+    for x in limpo.split(","):
+        x = x.strip()
+        if not x or x.upper() == "NULL":
+            continue
+        n = int(x)
+        if n not in vistos:
+            vistos.append(n)
+    return vistos
 
 
 def valor_fatura_proporcional_bruto(row):
@@ -81,12 +103,52 @@ def calcula_fatura_proporcional(row):
     return valor_fatura_proporcional_bruto(row)
 
 
+def dias_suspenso_por_debito(data_ultima_suspensao):
+    """Dias corridos desde a ultima suspensao por debito ate hoje."""
+    if not data_ultima_suspensao:
+        return None
+    dt = datetime.fromisoformat(data_ultima_suspensao)
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    return (datetime.now() - dt).days
+
+
+def descricao_abertura_atendimento(dias_em_suspensao):
+    """Texto padrao (confirmado com a Ana em 25/09/2026) pra descricao de
+    abertura do atendimento de cancelamento - usa dias_em_suspensao (dias
+    corridos desde a ultima suspensao por debito ate hoje - o cancelamento
+    real acontece ao bater 75 dias, mas como a automacao roda em lotes
+    periodicos, alguns clientes já passam desse numero quando processados)."""
+    return (
+        f"O serviço estava com status Suspenso por Débito há {dias_em_suspensao} dias, "
+        "por esse motivo foi cancelado automaticamente pelo sistema, de acordo "
+        "com as configurações atuais."
+    )
+
+
+def plano_tem_fidelidade(plano):
+    """Planos com 'SEM FIDELIDADE' no nome NUNCA cobram multa de rescisao,
+    mesmo que a consulta do Metabase (elegivel_multa) diga que sim -
+    combinado com a Ana em 25/09/2026 apos achar 4 clientes SEM FIDELIDADE
+    com elegivel_multa=True (provavelmente erro na consulta)."""
+    return "SEM FIDELIDADE" not in (plano or "").upper()
+
+
 def montar_plano(row):
     """Monta (SEM EXECUTAR) o plano de acoes de cancelamento para um
     cliente/servico, a partir de uma linha ja trazida pelo Metabase."""
-    tem_fidelidade = bool(row.get("elegivel_multa"))
+    aplica_multa = bool(row.get("elegivel_multa")) and plano_tem_fidelidade(row.get("plano"))
     fatura_proporcional = calcula_fatura_proporcional(row)
     ids_faturas_deletar = parse_ids_fatura(row.get("ids_faturas_deletar"))
+    dias_suspenso = dias_suspenso_por_debito(row.get("data_ultima_suspensao"))
+
+    # desde 25/09/2026 a propria consulta do Metabase ja traz id_empresa
+    # pronto (bate com AM=114/FILIAL MAO, PA=30/FILIAL STM) - usamos direto.
+    id_empresa = row.get("id_empresa")
+    erro_empresa = None if id_empresa is not None else (
+        f"Sem id_empresa na consulta pro estado '{row.get('estado')}' - confirmar "
+        "manualmente antes de incluir esse cliente na automacao"
+    )
 
     return {
         "id_cliente_servico": row.get("id_cliente_servico"),
@@ -95,6 +157,12 @@ def montar_plano(row):
         "cidade": row.get("cidade"),
         "estado": row.get("estado"),
         "valor_mensal": row.get("valor_mensal"),
+        "email_cliente": row.get("email_cliente"),
+        "id_empresa": id_empresa,
+        "elegivel_automacao": id_empresa is not None,
+        "motivo_inelegivel": erro_empresa,
+        "dias_suspenso": dias_suspenso,
+        "dias_habilitado_ate_suspensao": row.get("dias_habilitado_ate_suspensao"),
         "acoes": {
             "apagar_faturas_vencidas": {
                 "qtd": len(ids_faturas_deletar),
@@ -110,13 +178,13 @@ def montar_plano(row):
                 "valor": fatura_proporcional,
             },
             "cobrar_multa_rescisao": {
-                "aplica": tem_fidelidade,
-                "percentual": row.get("percentual_multa") if tem_fidelidade else None,
-                "valor": row.get("valor_multa_estimado") if tem_fidelidade else 0.0,
+                "aplica": aplica_multa,
+                "percentual": row.get("percentual_multa") if aplica_multa else None,
+                "valor": row.get("valor_multa_estimado") if aplica_multa else 0.0,
             },
             "abrir_atendimento_retirada": {
                 "tipo_atendimento": TIPO_ATENDIMENTO_RETIRADA,
-                "descricao_abertura": DESCRICAO_RETIRADA,
+                "descricao_abertura": descricao_abertura_atendimento(dias_suspenso),
             },
             "abrir_os_retirada": {
                 "tipo_os": TIPO_OS_RETIRADA,
@@ -157,6 +225,7 @@ def resume_lote(planos):
     qualquer execucao real."""
     return {
         "qtd_clientes": len(planos),
+        "qtd_inelegiveis": sum(1 for p in planos if not p.get("elegivel_automacao", True)),
         "qtd_atendimentos_a_abrir": len(planos),
         "qtd_os_a_abrir": len(planos),
         "qtd_faturas_a_apagar": sum(p["acoes"]["apagar_faturas_vencidas"]["qtd"] for p in planos),

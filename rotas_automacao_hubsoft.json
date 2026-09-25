@@ -1,5 +1,74 @@
 {
-  "_leia_isso": "Cenario real (nao mais generico): usa um cliente de verdade que atingiu 75 dias suspenso por debito, com o payload que a gente realmente mandaria pra API em cada passo. Testes ja feitos ficam em 'resposta_real_do_teste'. Onde ainda nao testamos, o campo fica null com 'proximo_teste_sugerido' explicando exatamente o que rodar em seguida (sempre primeiro contra o cliente de sandbox id_cliente_servico=11000, nunca direto num cliente real). A secao 'rotas' no fim mantem o detalhe tecnico de cada endpoint.",
+  "_leia_isso": "ATUALIZADO 25/09/2026: achamos e confirmamos com CANCELAMENTO REAL o endpoint UNICO que o painel usa (ver 'endpoint_definitivo' abaixo). Ele substitui as 5 chamadas separadas documentadas em 'cenario_real'/'rotas' (que ficam so como historico de como chegamos ate aqui). Use `acoes_cancelamento.cancelar_servico_completo` daqui pra frente.",
+
+  "endpoint_definitivo": {
+    "nome": "cancelar_servico_completo",
+    "status": "CONFIRMADO COM CANCELAMENTO REAL em 25/09/2026",
+    "rota": "POST /api/v1/cliente/servico/protocolo_cancelamento?id_motivo_cancelamento=67&id_cliente_servico=<id>",
+    "implementado_em": "acoes_cancelamento.cancelar_servico_completo(...)",
+    "descricao": "Endpoint OFICIAL usado pela propria tela 'Cancelamento do Servico' do painel HubSoft. Faz tudo numa chamada so: cancela faturas vencidas, gera fatura proporcional (calculo automatico, NAO precisa da formula plano/30*37), gera multa se aplicavel, abre atendimento + O.S. de retirada, desautoriza CPE, e marca o servico como cancelado (motivo + data).",
+    "teste_real_25_09_2026": {
+      "cliente": "id_cliente_servico=79593 (Manaus/AM, plano MAO_RE_COM FIDELIDADE_SUPER 150 Mbps + SVA)",
+      "protocolo_cancelamento_gerado": 132590,
+      "faturas_canceladas": ["6244751 (01/07/2026)", "6301296 (01/08/2026)"],
+      "fatura_proporcional_gerada": {
+        "cobranca_scm": 27.13,
+        "cobranca_sva": 108.54,
+        "total": 135.67,
+        "dias_calculados_pela_api": 117,
+        "observacao": "a API calculou 117 dias de utilizacao sozinha (tipo_calculo=automatico) - nao usamos nossa formula manual"
+      },
+      "valor_multa": "0 (motivo permite multa mas o contrato desse cliente ja tinha fidelidade vencida)",
+      "id_motivo_cancelamento_setado_no_servico": 67,
+      "data_cancelamento_setada_no_servico": "2026-09-25"
+    },
+    "corpo_completo_confirmado": {
+      "id_cliente_servico": "dinamico",
+      "motivo_cancelamento": {"id_motivo_cancelamento": 67},
+      "empresa": {"id_empresa": "dinamico - VARIA por filial/regiao do cliente, ex: 114 = FILIAL MAO. Ainda NAO sabemos como descobrir isso automaticamente por cliente - precisa resolver antes de rodar em lote com clientes de varias cidades"},
+      "observacao": "dinamico (texto livre)",
+      "cancelar_fatura_pendente": true,
+      "gerar_fatura": true,
+      "gerar_multa": true,
+      "gerar_proporcional": true,
+      "abrir_os_retirada": true,
+      "desautorizar_cpe": true,
+      "remover_porta": false,
+      "tipo_calculo": "automatico",
+      "data_vencimento": "dinamico (AAAA-MM-DD)",
+      "data_referencia_calculo_proporcional": null,
+      "faturas": [{"id_fatura": "dinamico, um objeto por fatura a cancelar"}],
+      "atendimento": {
+        "tipo_atendimento": {"id_tipo_atendimento": 288},
+        "descricao_abertura": "fixo",
+        "nome_contato": "dinamico",
+        "telefone_contato": "dinamico",
+        "email_contato": "dinamico (pode faltar pra alguns clientes - testar se aceita vazio/omitido)",
+        "atendimento_status": {"id_atendimento_status": 1},
+        "usuarios_responsaveis": [{"id": 1273}]
+      },
+      "descricao_os_retirada": "fixo",
+      "ordem_servico": {
+        "status": "aguardando_agendamento",
+        "duracao": "01:00:00",
+        "data_inicio_programado": "dinamico (mesma data_vencimento)",
+        "data_termino_programado": "dinamico (mesma data_vencimento)",
+        "hora_inicio_programado": "09:00:00",
+        "hora_termino_programado": "18:00:00",
+        "descricao_servico": "fixo",
+        "tecnicos": [{"id": 1273}],
+        "disponibilidade": [{"id_periodo_dia": 1}, {"id_periodo_dia": 2}],
+        "prioridade": {"id_prioridade": 3}
+      }
+    },
+    "pendencias_antes_de_rodar_em_lote": [
+      "Descobrir como determinar id_empresa por cliente (parece depender da cidade/filial - precisa mapear ou achar campo que devolva isso)",
+      "Confirmar se email_contato pode faltar/vir vazio (metabase nao traz email dos clientes hoje)",
+      "Decidir estrategia de horario/disponibilidade da O.S. em lote (hoje fixo 09h-18h, manha+tarde)"
+    ]
+  },
+
+  "_historico_descoberta_passo_a_passo": "As secoes abaixo (cenario_real, rotas) documentam como chegamos no endpoint unico acima, testando 5 chamadas separadas antes de achar que existia uma so. Mantido soh como historico/referencia.",
   "cenario_real": {
     "cliente_escolhido": {
       "id_cliente_servico": 268050,

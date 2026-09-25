@@ -11,12 +11,15 @@ Rodar com: streamlit run app_validacao.py
 """
 import os
 import sys
+from datetime import datetime, timedelta
 
 import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import acoes_cancelamento as acr
 import automacao_cancelamento as ac
+import hubsoft as h
 import metabase_cancelamento as mb
 
 st.set_page_config(page_title="Validacao de clientes - Metabase", layout="wide")
@@ -159,11 +162,16 @@ else:
 
         def _mostra_passo(i, total, plano_execucao):
             acoes = plano_execucao["acoes"]
+            elegivel = plano_execucao.get("elegivel_automacao", True)
             titulo = (
-                f"[{i}/{total}] {plano_execucao['cliente']} - {plano_execucao['plano']} "
-                f"(servico {plano_execucao['id_cliente_servico']})"
+                f"[{i}/{total}] {'[INELEGIVEL] ' if not elegivel else ''}{plano_execucao['cliente']} - "
+                f"{plano_execucao['plano']} (servico {plano_execucao['id_cliente_servico']})"
             )
-            with log_area.status(titulo, state="complete", expanded=True):
+            with log_area.status(titulo, state="error" if not elegivel else "complete", expanded=True):
+                if not elegivel:
+                    st.error(
+                        f"Cliente NAO entraria na automacao real: {plano_execucao.get('motivo_inelegivel')}"
+                    )
                 st.markdown(
                     f"**1. Apagar faturas vencidas:** {acoes['apagar_faturas_vencidas']['qtd']} "
                     f"fatura(s) - IDs: {acoes['apagar_faturas_vencidas']['ids_fatura']}"
@@ -195,6 +203,11 @@ else:
         )
 
         st.success(f"Simulacao concluida para {resumo_execucao['qtd_clientes']} clientes. Log: {caminho_log}")
+        if resumo_execucao["qtd_inelegiveis"] > 0:
+            st.error(
+                f"{resumo_execucao['qtd_inelegiveis']} cliente(s) NAO entrariam na automacao real "
+                "(ver detalhe marcado como [INELEGIVEL] em cada card acima)."
+            )
 
         s1, s2, s3, s4 = st.columns(4)
         s1.metric("Atendimentos a abrir", resumo_execucao["qtd_atendimentos_a_abrir"])
@@ -209,6 +222,107 @@ else:
             "Multa total (R$)",
             f"{resumo_execucao['valor_multa_total']:,.2f} ({resumo_execucao['qtd_com_multa']} clientes)",
         )
+
+    # -----------------------------------------------------------------------
+    # Execucao REAL (cliente por cliente, com confirmacao)
+    # -----------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("Execucao REAL do cancelamento (cliente por cliente)")
+    st.error(
+        "ATENCAO: isso executa o cancelamento DE VERDADE - cancela faturas, gera "
+        "cobranca/multa, abre atendimento e O.S. reais, desautoriza CPE. Acao real "
+        "e irreversivel por este programa. Processa 1 cliente por vez e espera sua "
+        "confirmacao (revisar o resultado) antes de seguir pro proximo."
+    )
+
+    if "exec_real_fila" not in st.session_state:
+        st.session_state.exec_real_fila = None
+        st.session_state.exec_real_indice = 0
+
+    confirmar_real = st.checkbox(
+        f"Confirmo que quero executar o cancelamento REAL para os {len(df_automacao)} "
+        f"cliente(s) do plano '{plano_automacao}', um por um, revisando cada resultado "
+        "antes de seguir.",
+        key="confirmar_real",
+    )
+    if st.button(
+        "Rodar automacao REAL",
+        type="primary",
+        disabled=not confirmar_real or len(df_automacao) == 0,
+    ):
+        st.session_state.exec_real_fila = df_automacao.to_dict("records")
+        st.session_state.exec_real_indice = 0
+
+    if st.session_state.exec_real_fila is not None:
+        fila = st.session_state.exec_real_fila
+        idx = st.session_state.exec_real_indice
+
+        if idx >= len(fila):
+            st.success(f"Fila concluida - {len(fila)} cliente(s) processado(s).")
+            if st.button("Fechar execucao real"):
+                st.session_state.exec_real_fila = None
+                st.session_state.exec_real_indice = 0
+                st.rerun()
+        else:
+            row = fila[idx]
+            plano_atual = ac.montar_plano(row)
+            st.markdown(
+                f"### Cliente {idx + 1}/{len(fila)}: {row['cliente']} "
+                f"(servico {row['id_cliente_servico']})"
+            )
+
+            if not plano_atual["elegivel_automacao"]:
+                st.warning(f"Pulando - inelegivel: {plano_atual['motivo_inelegivel']}")
+                if st.button("Continuar (pular este cliente)", key=f"pular_{idx}"):
+                    st.session_state.exec_real_indice += 1
+                    st.rerun()
+            else:
+                resultado_key = f"resultado_real_{row['id_cliente_servico']}_{idx}"
+                if resultado_key not in st.session_state:
+                    keys = h.load_keys()
+                    data_venc = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
+                    ids_fatura = plano_atual["acoes"]["apagar_faturas_vencidas"]["ids_fatura"]
+                    gerar_multa = plano_atual["acoes"]["cobrar_multa_rescisao"]["aplica"]
+                    descricao_atendimento = plano_atual["acoes"]["abrir_atendimento_retirada"]["descricao_abertura"]
+                    with st.spinner(f"Executando cancelamento real de {row['cliente']}..."):
+                        status, resp, corpo = acr.cancelar_servico_completo(
+                            keys,
+                            id_cliente_servico=row["id_cliente_servico"],
+                            id_empresa=plano_atual["id_empresa"],
+                            nome_contato=row["cliente"],
+                            telefone_contato=row.get("telefone_cliente") or "",
+                            email_contato=row.get("email_cliente") or "",
+                            ids_fatura_cancelar=ids_fatura,
+                            data_vencimento=data_venc,
+                            descricao_abertura_atendimento=descricao_atendimento,
+                            gerar_multa=gerar_multa,
+                        )
+                    st.session_state[resultado_key] = (status, resp, corpo)
+
+                status, resp, corpo = st.session_state[resultado_key]
+                sucesso = isinstance(resp, dict) and resp.get("status") == "success"
+
+                st.write(f"**HTTP {status}**")
+                if sucesso:
+                    st.success(resp.get("msg", "Sucesso"))
+                    protocolo = resp.get("protocolo_cancelamento") or {}
+                    ids_fatura_enviadas = [f["id_fatura"] for f in corpo["faturas"]]
+                    st.markdown(
+                        f"- **Protocolo de cancelamento:** {protocolo.get('id_protocolo_cancelamento')}\n"
+                        f"- **Faturas informadas para cancelar:** {ids_fatura_enviadas}\n"
+                        f"- **Multa gerada:** R$ {protocolo.get('valor_multa', '0')}\n"
+                    )
+                else:
+                    st.error("A chamada NAO teve sucesso - revise antes de continuar.")
+
+                with st.expander("JSON enviado (corpo da requisicao)"):
+                    st.json(corpo)
+                with st.expander("JSON recebido (resposta da API)", expanded=True):
+                    st.json(resp)
+
+                if st.button("OK, revisei - rodar o proximo cliente", type="primary", key=f"ok_{idx}"):
+                    st.session_state.exec_real_indice += 1
+                    st.rerun()
 
 # ---------------------------------------------------------------------------
 # Tabela (mesmo plano escolhido na automacao acima)

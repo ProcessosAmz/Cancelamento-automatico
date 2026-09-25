@@ -38,6 +38,143 @@ ID_ATENDIMENTO_STATUS_INICIAL = 1
 ID_TIPO_ORDEM_SERVICO_RETIRADA = 3  # "RETIRADA DE EQUIPAMENTOS"
 ID_TECNICO_RETIRADA = ID_USUARIO_RESPONSAVEL_RETIRADA  # mesma FILA_AMZ_AGENDAMENTO
 
+# Confirmados via CANCELAMENTO REAL em 25/09/2026 (cliente 79593, protocolo
+# de cancelamento 132590) - ver rotas_automacao_hubsoft.json.
+ID_MOTIVO_CANCELAMENTO_AUTOMATICO = 67  # "Cancelamento Automatico"
+ID_PRIORIDADE_OS_RETIRADA = 3
+ID_PERIODO_DIA_MANHA = 1
+ID_PERIODO_DIA_TARDE = 2
+
+
+def montar_corpo_cancelamento(
+    id_cliente_servico,
+    id_empresa,
+    nome_contato,
+    telefone_contato,
+    email_contato,
+    ids_fatura_cancelar,
+    data_vencimento,
+    descricao_abertura_atendimento,
+    gerar_multa=False,
+    observacao="Cliente com mais de 75 dias suspenso por debito",
+):
+    """Monta (SEM ENVIAR) o corpo da chamada de cancelamento completo - para
+    poder mostrar na tela exatamente o que vai ser mandado antes/depois de
+    executar de verdade. Ver cancelar_servico_completo pro que cada campo
+    faz e como foi confirmado.
+
+    descricao_abertura_atendimento: texto da descricao de abertura do
+    atendimento - usar automacao_cancelamento.descricao_abertura_atendimento
+    (dias suspenso) pra gerar o texto padrao combinado com a Ana em
+    25/09/2026.
+
+    gerar_multa: False por padrao - so passar True quando o plano do
+    cliente tiver fidelidade vigente (ver
+    automacao_cancelamento.plano_tem_fidelidade). Planos "SEM FIDELIDADE"
+    nunca devem gerar multa, independente do que a consulta do Metabase
+    diga em elegivel_multa."""
+    return {
+        "id_cliente_servico": int(id_cliente_servico),
+        "motivo_cancelamento": {"id_motivo_cancelamento": ID_MOTIVO_CANCELAMENTO_AUTOMATICO},
+        "empresa": {"id_empresa": int(id_empresa)},
+        "observacao": observacao,
+        "cancelar_fatura_pendente": True,
+        "gerar_fatura": True,
+        "gerar_multa": bool(gerar_multa),
+        "gerar_proporcional": True,
+        "abrir_os_retirada": True,
+        "desautorizar_cpe": True,
+        "remover_porta": False,
+        "tipo_calculo": "automatico",
+        "data_vencimento": data_vencimento,
+        "data_referencia_calculo_proporcional": None,
+        "faturas": [{"id_fatura": int(x)} for x in ids_fatura_cancelar],
+        "atendimento": {
+            "tipo_atendimento": {"id_tipo_atendimento": ID_TIPO_ATENDIMENTO_RETIRADA},
+            "descricao_abertura": descricao_abertura_atendimento,
+            "nome_contato": nome_contato,
+            "telefone_contato": telefone_contato,
+            "email_contato": email_contato,
+            "atendimento_status": {"id_atendimento_status": ID_ATENDIMENTO_STATUS_INICIAL},
+            "usuarios_responsaveis": [{"id": ID_USUARIO_RESPONSAVEL_RETIRADA}],
+        },
+        "descricao_os_retirada": "Equipamentos no momento do cancelamento",
+        "ordem_servico": {
+            "status": "aguardando_agendamento",
+            "duracao": "01:00:00",
+            "data_inicio_programado": data_vencimento,
+            "data_termino_programado": data_vencimento,
+            "hora_inicio_programado": "09:00:00",
+            "hora_termino_programado": "18:00:00",
+            "descricao_servico": ac.DESCRICAO_RETIRADA,
+            "tecnicos": [{"id": ID_TECNICO_RETIRADA}],
+            "disponibilidade": [
+                {"id_periodo_dia": ID_PERIODO_DIA_MANHA},
+                {"id_periodo_dia": ID_PERIODO_DIA_TARDE},
+            ],
+            "prioridade": {"id_prioridade": ID_PRIORIDADE_OS_RETIRADA},
+        },
+    }
+
+
+def cancelar_servico_completo(
+    keys,
+    id_cliente_servico,
+    id_empresa,
+    nome_contato,
+    telefone_contato,
+    email_contato,
+    ids_fatura_cancelar,
+    data_vencimento,
+    descricao_abertura_atendimento,
+    gerar_multa=False,
+    observacao="Cliente com mais de 75 dias suspenso por debito",
+):
+    """ACAO REAL COMPLETA DE CANCELAMENTO: endpoint OFICIAL usado pela
+    propria tela "Cancelamento do Servico" do painel HubSoft
+    (POST /api/v1/cliente/servico/protocolo_cancelamento). Numa unica
+    chamada: cancela as faturas vencidas informadas, gera a fatura
+    proporcional (calculo automatico pela API - nao precisa da nossa formula
+    plano/30*37), gera a multa se gerar_multa=True, abre o atendimento +
+    O.S. de retirada de equipamento, desautoriza o CPE, e marca o servico
+    como cancelado (motivo + data). SUBSTITUI as 5 chamadas separadas
+    (abrir_atendimento_retirada, abrir_os_retirada, apagar_faturas_vencidas,
+    gerar_fatura_proporcional, desautorizar_cpe) - use esta funcao daqui pra
+    frente.
+
+    CONFIRMADO com um cancelamento real em 25/09/2026 (cliente 79593,
+    protocolo de cancelamento 132590) - ver rotas_automacao_hubsoft.json
+    pro payload completo e a resposta real.
+
+    id_empresa: VARIA por filial/regiao do cliente (ex: 114 = FILIAL MAO).
+    gerar_multa: False por padrao - so True se o plano tiver fidelidade
+    vigente (ver automacao_cancelamento.plano_tem_fidelidade).
+    Retorna (status, resposta, corpo_enviado) - o corpo e devolvido junto
+    pra quem chamou poder exibir/logar exatamente o que foi mandado."""
+    corpo = montar_corpo_cancelamento(
+        id_cliente_servico,
+        id_empresa,
+        nome_contato,
+        telefone_contato,
+        email_contato,
+        ids_fatura_cancelar,
+        data_vencimento,
+        descricao_abertura_atendimento,
+        gerar_multa=gerar_multa,
+        observacao=observacao,
+    )
+    status, resp = h.api_call(
+        keys,
+        "POST",
+        "/api/v1/cliente/servico/protocolo_cancelamento",
+        params={
+            "id_motivo_cancelamento": ID_MOTIVO_CANCELAMENTO_AUTOMATICO,
+            "id_cliente_servico": int(id_cliente_servico),
+        },
+        body=corpo,
+    )
+    return status, resp, corpo
+
 
 def abrir_atendimento_retirada(keys, id_cliente_servico, nome, telefone):
     """ACAO REAL: abre um atendimento de verdade tipo "RETIRADA DE

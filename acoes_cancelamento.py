@@ -7,7 +7,7 @@ sandbox, ver hubsoft.py). Cada chamada aqui e uma acao real e nao reversivel
 por este programa.
 
 Fluxo antigo (executar_um/executar_lote): abre um atendimento generico
-pedindo cancelamento (usado por app_cancelamento.py hoje).
+pedindo cancelamento (nao usado pela tela atual).
 
 Fluxo novo (abrir_atendimento_retirada): abre o atendimento especifico de
 "RETIRADA DE EQUIPAMENTOS" com responsavel FILA_AMZ_AGENDAMENTO. Parametros
@@ -56,6 +56,7 @@ def montar_corpo_cancelamento(
     data_vencimento,
     descricao_abertura_atendimento,
     gerar_multa=False,
+    gerar_proporcional=False,
     observacao="Cliente com mais de 75 dias suspenso por debito",
 ):
     """Monta (SEM ENVIAR) o corpo da chamada de cancelamento completo - para
@@ -72,7 +73,13 @@ def montar_corpo_cancelamento(
     cliente tiver fidelidade vigente (ver
     automacao_cancelamento.plano_tem_fidelidade). Planos "SEM FIDELIDADE"
     nunca devem gerar multa, independente do que a consulta do Metabase
-    diga em elegivel_multa."""
+    diga em elegivel_multa.
+
+    gerar_proporcional: False por padrao (desde 26/09/2026) - o calculo
+    automatico da API conta os dias da ULTIMA COBRANCA ate o CANCELAMENTO,
+    nao da ultima suspensao, entao nao e o valor real que queremos cobrar.
+    Deixamos False aqui e geramos a fatura proporcional numa chamada
+    separada (gerar_fatura_proporcional), com o nosso valor fixo de 37 dias."""
     return {
         "id_cliente_servico": int(id_cliente_servico),
         "motivo_cancelamento": {"id_motivo_cancelamento": ID_MOTIVO_CANCELAMENTO_AUTOMATICO},
@@ -81,7 +88,7 @@ def montar_corpo_cancelamento(
         "cancelar_fatura_pendente": True,
         "gerar_fatura": True,
         "gerar_multa": bool(gerar_multa),
-        "gerar_proporcional": True,
+        "gerar_proporcional": bool(gerar_proporcional),
         "abrir_os_retirada": True,
         "desautorizar_cpe": True,
         "remover_porta": False,
@@ -128,19 +135,18 @@ def cancelar_servico_completo(
     data_vencimento,
     descricao_abertura_atendimento,
     gerar_multa=False,
+    gerar_proporcional=False,
     observacao="Cliente com mais de 75 dias suspenso por debito",
 ):
     """ACAO REAL COMPLETA DE CANCELAMENTO: endpoint OFICIAL usado pela
     propria tela "Cancelamento do Servico" do painel HubSoft
     (POST /api/v1/cliente/servico/protocolo_cancelamento). Numa unica
-    chamada: cancela as faturas vencidas informadas, gera a fatura
-    proporcional (calculo automatico pela API - nao precisa da nossa formula
-    plano/30*37), gera a multa se gerar_multa=True, abre o atendimento +
-    O.S. de retirada de equipamento, desautoriza o CPE, e marca o servico
-    como cancelado (motivo + data). SUBSTITUI as 5 chamadas separadas
-    (abrir_atendimento_retirada, abrir_os_retirada, apagar_faturas_vencidas,
-    gerar_fatura_proporcional, desautorizar_cpe) - use esta funcao daqui pra
-    frente.
+    chamada: cancela as faturas vencidas informadas, gera multa/proporcional
+    se pedido, abre o atendimento + O.S. de retirada de equipamento,
+    desautoriza o CPE, e marca o servico como cancelado (motivo + data).
+    SUBSTITUI as 5 chamadas separadas (abrir_atendimento_retirada,
+    abrir_os_retirada, apagar_faturas_vencidas, gerar_fatura_proporcional,
+    desautorizar_cpe) - use esta funcao daqui pra frente.
 
     CONFIRMADO com um cancelamento real em 25/09/2026 (cliente 79593,
     protocolo de cancelamento 132590) - ver rotas_automacao_hubsoft.json
@@ -149,6 +155,10 @@ def cancelar_servico_completo(
     id_empresa: VARIA por filial/regiao do cliente (ex: 114 = FILIAL MAO).
     gerar_multa: False por padrao - so True se o plano tiver fidelidade
     vigente (ver automacao_cancelamento.plano_tem_fidelidade).
+    gerar_proporcional: False por padrao (desde 26/09/2026) - o calculo
+    automatico da API usa dias reais (ultima cobranca ate cancelamento), nao
+    o nosso valor fixo de 37 dias - gerar a fatura proporcional depois, numa
+    chamada separada (gerar_fatura_proporcional).
     Retorna (status, resposta, corpo_enviado) - o corpo e devolvido junto
     pra quem chamou poder exibir/logar exatamente o que foi mandado."""
     corpo = montar_corpo_cancelamento(
@@ -161,6 +171,7 @@ def cancelar_servico_completo(
         data_vencimento,
         descricao_abertura_atendimento,
         gerar_multa=gerar_multa,
+        gerar_proporcional=gerar_proporcional,
         observacao=observacao,
     )
     status, resp = h.api_call(
@@ -311,6 +322,22 @@ def gerar_fatura_proporcional(keys, id_cliente_servico, valor, descricao, data_v
             "parcelado": parcelado,
         },
     )
+
+
+def gerar_fatura_multa(keys, id_cliente_servico, valor, descricao, data_vencimento, parcelado=False):
+    """ACAO REAL: gera a multa de rescisao numa fatura SEPARADA da fatura
+    proporcional - mesma rota de gerar_fatura_proporcional
+    (POST .../financeiro/cobranca/com_fatura), so que numa chamada isolada.
+
+    Por que separado: confirmado com a Ana em 26/09/2026 que quando
+    gerar_multa e gerar_proporcional vao juntos na mesma chamada de
+    cancelar_servico_completo, a API AGRUPA as cobrancas de multa e
+    proporcional numa unica fatura (mesma data_vencimento -> mesmo
+    agrupamento). O esperado e cada uma sair na sua propria fatura. Solucao:
+    chamar cancelar_servico_completo com gerar_multa=False (so gera a fatura
+    proporcional dentro do cancelamento) e, em seguida, chamar esta funcao
+    separada pra gerar a fatura da multa."""
+    return gerar_fatura_proporcional(keys, id_cliente_servico, valor, descricao, data_vencimento, parcelado)
 
 
 def apagar_faturas_vencidas(keys, ids_fatura, observacao):

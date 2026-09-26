@@ -178,12 +178,18 @@ else:
                 )
                 fp = acoes["gerar_fatura_proporcional"]
                 if fp["aplica"]:
-                    st.markdown(f"**2. Gerar fatura proporcional:** R$ {fp['valor']:,.2f} ({fp['motivo']})")
+                    st.markdown(
+                        f"**2. Gerar fatura proporcional:** R$ {fp['valor']:,.2f} "
+                        f"({fp['motivo']}) - \"{fp['descricao']}\""
+                    )
                 else:
                     st.markdown(f"**2. Gerar fatura proporcional:** nao aplica ({fp['motivo']})")
                 multa = acoes["cobrar_multa_rescisao"]
                 if multa["aplica"]:
-                    st.markdown(f"**3. Cobrar multa de rescisao:** R$ {multa['valor']:,.2f} ({multa['percentual']}%)")
+                    st.markdown(
+                        f"**3. Cobrar multa de rescisao:** R$ {multa['valor']:,.2f} "
+                        f"({multa['meses_restantes']} meses restantes de fidelidade) - \"{multa['descricao']}\""
+                    )
                 else:
                     st.markdown("**3. Cobrar multa de rescisao:** nao aplica (sem fidelidade vigente)")
                 at = acoes["abrir_atendimento_retirada"]
@@ -282,9 +288,16 @@ else:
                     keys = h.load_keys()
                     data_venc = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
                     ids_fatura = plano_atual["acoes"]["apagar_faturas_vencidas"]["ids_fatura"]
-                    gerar_multa = plano_atual["acoes"]["cobrar_multa_rescisao"]["aplica"]
+                    multa = plano_atual["acoes"]["cobrar_multa_rescisao"]
+                    proporcional = plano_atual["acoes"]["gerar_fatura_proporcional"]
                     descricao_atendimento = plano_atual["acoes"]["abrir_atendimento_retirada"]["descricao_abertura"]
                     with st.spinner(f"Executando cancelamento real de {row['cliente']}..."):
+                        # gerar_multa=False e gerar_proporcional=False sempre aqui:
+                        # as duas saem em chamadas separadas depois, com nosso
+                        # valor/descricao proprios, pra nao ficar agrupadas na
+                        # mesma fatura nem usar o calculo automatico da API (que
+                        # conta da ultima cobranca ate o cancelamento, nao da
+                        # ultima suspensao)
                         status, resp, corpo = acr.cancelar_servico_completo(
                             keys,
                             id_cliente_servico=row["id_cliente_servico"],
@@ -295,11 +308,36 @@ else:
                             ids_fatura_cancelar=ids_fatura,
                             data_vencimento=data_venc,
                             descricao_abertura_atendimento=descricao_atendimento,
-                            gerar_multa=gerar_multa,
+                            gerar_multa=False,
+                            gerar_proporcional=False,
                         )
-                    st.session_state[resultado_key] = (status, resp, corpo)
 
-                status, resp, corpo = st.session_state[resultado_key]
+                        resultado_multa = None
+                        resultado_proporcional = None
+                        sucesso_cancelamento = isinstance(resp, dict) and resp.get("status") == "success"
+
+                        if sucesso_cancelamento and proporcional["aplica"]:
+                            status_p, resp_p = acr.gerar_fatura_proporcional(
+                                keys,
+                                id_cliente_servico=row["id_cliente_servico"],
+                                valor=proporcional["valor"],
+                                descricao=proporcional["descricao"],
+                                data_vencimento=data_venc,
+                            )
+                            resultado_proporcional = (status_p, resp_p)
+
+                        if sucesso_cancelamento and multa["aplica"]:
+                            status_m, resp_m = acr.gerar_fatura_multa(
+                                keys,
+                                id_cliente_servico=row["id_cliente_servico"],
+                                valor=multa["valor"],
+                                descricao=multa["descricao"],
+                                data_vencimento=data_venc,
+                            )
+                            resultado_multa = (status_m, resp_m)
+                    st.session_state[resultado_key] = (status, resp, corpo, resultado_multa, resultado_proporcional)
+
+                status, resp, corpo, resultado_multa, resultado_proporcional = st.session_state[resultado_key]
                 sucesso = isinstance(resp, dict) and resp.get("status") == "success"
 
                 st.write(f"**HTTP {status}**")
@@ -310,14 +348,33 @@ else:
                     st.markdown(
                         f"- **Protocolo de cancelamento:** {protocolo.get('id_protocolo_cancelamento')}\n"
                         f"- **Faturas informadas para cancelar:** {ids_fatura_enviadas}\n"
-                        f"- **Multa gerada:** R$ {protocolo.get('valor_multa', '0')}\n"
                     )
                 else:
                     st.error("A chamada NAO teve sucesso - revise antes de continuar.")
 
-                with st.expander("JSON enviado (corpo da requisicao)"):
+                if resultado_proporcional is not None:
+                    status_p, resp_p = resultado_proporcional
+                    sucesso_p = isinstance(resp_p, dict) and resp_p.get("status") == "success"
+                    if sucesso_p:
+                        st.success(f"Fatura proporcional gerada separadamente (HTTP {status_p}).")
+                    else:
+                        st.error(f"Fatura proporcional FALHOU (HTTP {status_p}) - revise abaixo.")
+                    with st.expander("JSON da chamada de fatura proporcional (separada)", expanded=not sucesso_p):
+                        st.json(resp_p)
+
+                if resultado_multa is not None:
+                    status_m, resp_m = resultado_multa
+                    sucesso_m = isinstance(resp_m, dict) and resp_m.get("status") == "success"
+                    if sucesso_m:
+                        st.success(f"Fatura de multa gerada separadamente (HTTP {status_m}).")
+                    else:
+                        st.error(f"Fatura de multa FALHOU (HTTP {status_m}) - revise abaixo.")
+                    with st.expander("JSON da chamada de multa (separada)", expanded=not sucesso_m):
+                        st.json(resp_m)
+
+                with st.expander("JSON enviado (corpo do cancelamento)"):
                     st.json(corpo)
-                with st.expander("JSON recebido (resposta da API)", expanded=True):
+                with st.expander("JSON recebido (resposta do cancelamento)", expanded=True):
                     st.json(resp)
 
                 if st.button("OK, revisei - rodar o proximo cliente", type="primary", key=f"ok_{idx}"):

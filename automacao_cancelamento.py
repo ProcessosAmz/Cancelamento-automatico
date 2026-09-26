@@ -134,6 +134,35 @@ def plano_tem_fidelidade(plano):
     return "SEM FIDELIDADE" not in (plano or "").upper()
 
 
+TOTAL_CICLOS_FIDELIDADE = 13
+
+
+def meses_restantes_fidelidade(qtd_faturas_pagas):
+    """Meses restantes de fidelidade = 13 menos o total de faturas ja pagas
+    (combinado com a Ana em 26/09/2026). Nunca negativo - fidelidade ja
+    cumprida vira 0."""
+    return max(0, TOTAL_CICLOS_FIDELIDADE - int(qtd_faturas_pagas or 0))
+
+
+def descricao_multa_rescisao(qtd_faturas_pagas):
+    """Texto padrao (combinado com a Ana em 26/09/2026) pra descricao da
+    fatura de multa - inclui a quantidade de meses restantes de fidelidade."""
+    meses = meses_restantes_fidelidade(qtd_faturas_pagas)
+    return f"Multa proporcional aos {meses} meses restantes de fidelidade"
+
+
+def descricao_fatura_proporcional(plano):
+    """Texto padrao (combinado com a Ana em 26/09/2026) pra descricao da
+    fatura proporcional - usa os FATURA_PROPORCIONAL_DIAS fixos (37), nao os
+    dias calculados automaticamente pela API (que conta da ultima cobranca
+    ate o dia do cancelamento, nao da ultima suspensao - nao e o dado real
+    que queremos cobrar)."""
+    return (
+        f"Cancelamento - Proporcional referente à {FATURA_PROPORCIONAL_DIAS} "
+        f"dia(s) de utilização do serviço - {plano}"
+    )
+
+
 def montar_plano(row):
     """Monta (SEM EXECUTAR) o plano de acoes de cancelamento para um
     cliente/servico, a partir de uma linha ja trazida pelo Metabase."""
@@ -176,11 +205,14 @@ def montar_plano(row):
                     else "nao ha fatura vencida a substituir"
                 ),
                 "valor": fatura_proporcional,
+                "descricao": descricao_fatura_proporcional(row.get("plano")) if fatura_proporcional is not None else None,
             },
             "cobrar_multa_rescisao": {
                 "aplica": aplica_multa,
                 "percentual": row.get("percentual_multa") if aplica_multa else None,
                 "valor": row.get("valor_multa_estimado") if aplica_multa else 0.0,
+                "meses_restantes": meses_restantes_fidelidade(row.get("qtd_faturas_pagas")) if aplica_multa else None,
+                "descricao": descricao_multa_rescisao(row.get("qtd_faturas_pagas")) if aplica_multa else None,
             },
             "abrir_atendimento_retirada": {
                 "tipo_atendimento": TIPO_ATENDIMENTO_RETIRADA,

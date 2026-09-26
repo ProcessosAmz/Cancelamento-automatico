@@ -66,7 +66,7 @@ def _dias_desde(data_iso):
 
 def mapeia_servico(row):
     """Converte 1 linha crua da consulta nova no formato de registro usado
-    pela tela/acoes de cancelamento (app_cancelamento.py, acoes_cancelamento.py)."""
+    pela tela/acoes de cancelamento (app_validacao.py, acoes_cancelamento.py)."""
     dias_suspenso = _dias_desde(row.get("data_ultima_suspensao"))
     contrato_assinado = row.get("classificacao_contrato") == CONTRATO_ASSINADO
     cobra_multa = bool(row.get("elegivel_multa"))

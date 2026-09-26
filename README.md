@@ -1,15 +1,12 @@
 # Cancelamento automático
 
 Ferramenta para identificar e cancelar clientes suspensos por débito há 75+
-dias (Amazonet/HubSoft). Tem duas telas separadas:
+dias (Amazonet/HubSoft). Tudo roda numa tela só, `app_validacao.py`, que
+tem a **simulação** (só leitura e cálculo, não muda nada) e a **execução
+real** (irreversível por este programa).
 
-| Tela | Arquivo | O que faz | Risco |
-|---|---|---|---|
-| **Validação e simulação** | `app_validacao.py` | Mostra os clientes trazidos pelo Metabase, filtros, resumo por plano e uma simulação passo a passo do que a automação faria | Nenhum — só leitura e cálculo, não muda nada |
-| **Execução real** | `app_cancelamento.py` | Abre atendimento de verdade no SAC do HubSoft pedindo o cancelamento dos clientes selecionados | **Real e irreversível** por este programa |
-
-Comece sempre pela tela de **validação e simulação** pra conferir os números
-antes de rodar qualquer execução real.
+Rode sempre a **simulação** primeiro pra conferir os números antes de rodar
+qualquer execução real.
 
 ## 1. Preparar o computador (só na primeira vez)
 
@@ -60,25 +57,17 @@ Toda vez que for usar, só repete estes passos (não precisa reinstalar nada):
    ```
    venv\Scripts\activate
    ```
-3. Rode a tela que quiser:
-
-   **Para validar e simular** (recomendado primeiro):
+3. Rode a tela:
    ```
    streamlit run app_validacao.py
-   ```
-
-   **Para executar o cancelamento de verdade**:
-   ```
-   streamlit run app_cancelamento.py
    ```
 4. O navegador abre sozinho em `http://localhost:8501` com a tela. Se não
    abrir automaticamente, copie esse endereço e cole no navegador.
 5. Para encerrar, feche a aba do navegador e depois feche (ou aperte
    `Ctrl+C`) a janela do terminal.
 
-## 3. O que cada tela mostra
+## 3. O que a tela mostra
 
-### `app_validacao.py` — Validação e simulação
 - Filtros por nome, plano, cidade, estado, contrato assinado e elegibilidade
   a multa.
 - Tabela com a quantidade de clientes por plano que já atingiram 75+ dias de
@@ -90,14 +79,10 @@ Toda vez que for usar, só repete estes passos (não precisa reinstalar nada):
   fatura proporcional que as substitui, cobrar multa quando aplicável, abrir
   atendimento + O.S. de retirada de equipamento, desautorizar o CPE) — sem
   chamar a API de verdade. Salva um log da simulação em `saidas/`.
-
-### `app_cancelamento.py` — Execução real
-- Mesma base de dados do Metabase, com filtros e seleção de clientes.
-- Ao confirmar, abre um atendimento **real** na fila do SAC do HubSoft para
-  cada cliente selecionado, pedindo o cancelamento. Fica um log de
-  auditoria em `saidas/execucao_cancelamento_*.json`.
-- Essa tela **não pode ser desfeita** pelo programa depois de rodar — revise
-  sempre a lista antes de confirmar.
+- Botão **"Rodar automação REAL"** (só libera depois de marcar a caixa de
+  confirmação): executa esses passos de verdade no HubSoft, um cliente por
+  vez, esperando você revisar o resultado antes de seguir pro próximo.
+  **Não pode ser desfeito** pelo programa — revise sempre a lista antes.
 
 ## 4. Se der algum erro
 

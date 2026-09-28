@@ -37,6 +37,8 @@ gerar a previa (simulacao) que a tela mostra.
 """
 import json
 import os
+
+import empresas
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,7 +50,7 @@ FATURA_PROPORCIONAL_BASE_DIAS = 30
 TIPO_ATENDIMENTO_RETIRADA = "RETIRADA DE EQUIPAMENTOS"
 DESCRICAO_RETIRADA = "RETIRAR EQUIPAMENTO EM COMODATO."
 TIPO_OS_RETIRADA = "RETIRADA DE EQUIPAMENTOS"
-FILA_AGENDAMENTO = "FILA_AMZ_AGENDAMENTO"
+FILA_AGENDAMENTO = "FILA_AMZ_AGENDAMENTO"  # Amazonet - por empresa em empresas.py
 
 # Combinado com Ana em 25/09/2026: qual empresa/filial usar no cancelamento
 # (campo "empresa" do endpoint de cancelamento). Desde 25/09/2026 a propria
@@ -151,6 +153,17 @@ def descricao_multa_rescisao(qtd_faturas_pagas):
     return f"Multa proporcional aos {meses} meses restantes de fidelidade"
 
 
+def meses_restantes(row, empresa="amazonet"):
+    """Meses restantes de fidelidade, pro texto da fatura de multa - cada
+    empresa conta de um jeito (empresas.py, meses_restantes_por):
+      - Amazonet: 13 - faturas pagas (Ana, 26/09/2026).
+      - Mania: 13 - mes_cancelamento da consulta (1o mes = 12 restantes),
+        mesma conta que a consulta usa pra calcular a multa."""
+    if empresas.get(empresa)["meses_restantes_por"] == "mes_cancelamento":
+        return max(0, TOTAL_CICLOS_FIDELIDADE - int(row.get("mes_cancelamento") or 1))
+    return meses_restantes_fidelidade(row.get("qtd_faturas_pagas"))
+
+
 def descricao_fatura_proporcional(plano):
     """Texto padrao (combinado com a Ana em 26/09/2026) pra descricao da
     fatura proporcional - usa os FATURA_PROPORCIONAL_DIAS fixos (37), nao os
@@ -163,16 +176,24 @@ def descricao_fatura_proporcional(plano):
     )
 
 
-def montar_plano(row):
+def montar_plano(row, empresa="amazonet"):
     """Monta (SEM EXECUTAR) o plano de acoes de cancelamento para um
     cliente/servico, a partir de uma linha ja trazida pelo Metabase."""
-    aplica_multa = bool(row.get("elegivel_multa")) and plano_tem_fidelidade(row.get("plano"))
+    fila = empresas.get(empresa)["fila_agendamento"] or "(fila de agendamento nao informada)"
+    # multa zerada nao gera fatura (ex: fidelidade ja cumprida)
+    aplica_multa = (
+        bool(row.get("elegivel_multa"))
+        and plano_tem_fidelidade(row.get("plano"))
+        and (row.get("valor_multa_estimado") or 0) > 0
+    )
+    meses = meses_restantes(row, empresa)
     fatura_proporcional = calcula_fatura_proporcional(row)
     ids_faturas_deletar = parse_ids_fatura(row.get("ids_faturas_deletar"))
     dias_suspenso = dias_suspenso_por_debito(row.get("data_ultima_suspensao"))
 
     # desde 25/09/2026 a propria consulta do Metabase ja traz id_empresa
     # pronto (bate com AM=114/FILIAL MAO, PA=30/FILIAL STM) - usamos direto.
+    # (Mania: AM=64/MATRIZ MAO, PA=68/FILIAL STM)
     id_empresa = row.get("id_empresa")
     erro_empresa = None if id_empresa is not None else (
         f"Sem id_empresa na consulta pro estado '{row.get('estado')}' - confirmar "
@@ -211,8 +232,11 @@ def montar_plano(row):
                 "aplica": aplica_multa,
                 "percentual": row.get("percentual_multa") if aplica_multa else None,
                 "valor": row.get("valor_multa_estimado") if aplica_multa else 0.0,
-                "meses_restantes": meses_restantes_fidelidade(row.get("qtd_faturas_pagas")) if aplica_multa else None,
-                "descricao": descricao_multa_rescisao(row.get("qtd_faturas_pagas")) if aplica_multa else None,
+                "meses_restantes": meses if aplica_multa else None,
+                "descricao": (
+                    f"Multa proporcional aos {meses} meses restantes de fidelidade"
+                    if aplica_multa else None
+                ),
             },
             "abrir_atendimento_retirada": {
                 "tipo_atendimento": TIPO_ATENDIMENTO_RETIRADA,
@@ -222,21 +246,21 @@ def montar_plano(row):
                 "tipo_os": TIPO_OS_RETIRADA,
                 "descricao_abertura": DESCRICAO_RETIRADA,
                 "descricao_servico": DESCRICAO_RETIRADA,
-                "tecnico_responsavel": FILA_AGENDAMENTO,
-                "usuario_responsavel": FILA_AGENDAMENTO,
+                "tecnico_responsavel": fila,
+                "usuario_responsavel": fila,
             },
             "desautorizar_cpe": {"aplica": True},
         },
     }
 
 
-def montar_plano_lote(linhas):
+def montar_plano_lote(linhas, empresa="amazonet"):
     """linhas: lista de dicts (linhas cruas do metabase_cancelamento).
     Retorna a lista de planos de acao, um por cliente/servico."""
-    return [montar_plano(row) for row in linhas]
+    return [montar_plano(row, empresa) for row in linhas]
 
 
-def simular_lote(linhas, callback_progresso=None):
+def simular_lote(linhas, callback_progresso=None, empresa="amazonet"):
     """Roda o MESMO loop cliente-por-cliente que a execucao real vai usar
     depois (so que aqui cada passo e so calculado/descrito, nada e chamado
     na API). callback_progresso(indice, total, plano) e chamado a cada
@@ -245,7 +269,7 @@ def simular_lote(linhas, callback_progresso=None):
     planos = []
     total = len(linhas)
     for i, row in enumerate(linhas, start=1):
-        plano = montar_plano(row)
+        plano = montar_plano(row, empresa)
         planos.append(plano)
         if callback_progresso:
             callback_progresso(i, total, plano)
@@ -280,13 +304,13 @@ def resume_lote(planos):
     }
 
 
-def salvar_simulacao(planos, resumo, gerado_por):
+def salvar_simulacao(planos, resumo, gerado_por, empresa="amazonet"):
     os.makedirs(SAIDAS_DIR, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = os.path.join(SAIDAS_DIR, f"simulacao_automacao_{ts}.json")
+    path = os.path.join(SAIDAS_DIR, f"simulacao_automacao_{empresa}_{ts}.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(
-            {"gerado_por": gerado_por, "gerado_em": ts, "resumo": resumo, "planos": planos},
+            {"empresa": empresa, "gerado_por": gerado_por, "gerado_em": ts, "resumo": resumo, "planos": planos},
             f,
             ensure_ascii=False,
             indent=2,

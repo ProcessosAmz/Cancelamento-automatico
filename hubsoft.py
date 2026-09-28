@@ -191,32 +191,44 @@ REST_DESABILITADAS = {
 # infra basica: keys, http, token, chamadas REST e GraphQL
 # ---------------------------------------------------------------------------
 
-def load_keys():
+def read_env():
+    """Le o .env (ou keys.env) inteiro como dict. Vazio se nao existir."""
+    env = {}
     if not os.path.exists(KEYS_PATH):
-        sys.exit(
-            f"ERRO: nao encontrei {KEYS_PATH}. Crie o arquivo .env (ou keys.env) com "
-            "HUBSOFT_BASE_URL, HUBSOFT_CLIENT_ID, HUBSOFT_CLIENT_SECRET, "
-            "HUBSOFT_USERNAME, HUBSOFT_PASSWORD."
-        )
-    keys = {}
+        return env
     with open(KEYS_PATH, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
             k, v = line.split("=", 1)
-            keys[k.strip()] = v.strip().strip('"').strip("'")
-    obrigatorias = [
-        "HUBSOFT_BASE_URL",
-        "HUBSOFT_CLIENT_ID",
-        "HUBSOFT_CLIENT_SECRET",
-        "HUBSOFT_USERNAME",
-        "HUBSOFT_PASSWORD",
-    ]
-    faltando = [k for k in obrigatorias if k not in keys or not keys[k]]
+            env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+def load_keys(empresa="amazonet"):
+    """Credenciais da instancia HubSoft da empresa (ver empresas.py). As
+    chaves sao lidas com o prefixo da empresa (ex: MANIA_HUBSOFT_BASE_URL) e
+    devolvidas sempre com os nomes HUBSOFT_*, pro resto do codigo nao mudar.
+    Cada empresa tem seu proprio cache de token."""
+    import empresas
+
+    cfg = empresas.get(empresa)
+    prefixo = cfg["prefixo_env"]
+    if not os.path.exists(KEYS_PATH):
+        sys.exit(
+            f"ERRO: nao encontrei {KEYS_PATH}. Crie o arquivo .env (ou keys.env) com "
+            f"{prefixo}BASE_URL, {prefixo}CLIENT_ID, {prefixo}CLIENT_SECRET, "
+            f"{prefixo}USERNAME, {prefixo}PASSWORD."
+        )
+    env = read_env()
+    campos = ["BASE_URL", "CLIENT_ID", "CLIENT_SECRET", "USERNAME", "PASSWORD"]
+    faltando = [prefixo + c for c in campos if not env.get(prefixo + c)]
     if faltando:
-        sys.exit(f"ERRO: keys.env esta sem: {', '.join(faltando)}")
+        sys.exit(f"ERRO: .env esta sem: {', '.join(faltando)}")
+    keys = {"HUBSOFT_" + c: env[prefixo + c] for c in campos}
     keys["HUBSOFT_BASE_URL"] = keys["HUBSOFT_BASE_URL"].rstrip("/")
+    keys["_token_cache"] = os.path.join(HERE, cfg["token_cache"])
     return keys
 
 
@@ -242,8 +254,9 @@ def http_request(url, method="GET", headers=None, data=None, timeout=30):
 
 
 def get_token(keys, force_refresh=False):
-    if not force_refresh and os.path.exists(TOKEN_CACHE_PATH):
-        with open(TOKEN_CACHE_PATH, "r", encoding="utf-8") as f:
+    cache_path = keys.get("_token_cache", TOKEN_CACHE_PATH)
+    if not force_refresh and os.path.exists(cache_path):
+        with open(cache_path, "r", encoding="utf-8") as f:
             cache = json.load(f)
         if cache.get("expires_at", 0) - TOKEN_SAFETY_MARGIN > time.time():
             return cache["token_type"], cache["access_token"]
@@ -266,7 +279,7 @@ def get_token(keys, force_refresh=False):
         "access_token": resp["access_token"],
         "expires_at": time.time() + expires_in,
     }
-    with open(TOKEN_CACHE_PATH, "w", encoding="utf-8") as f:
+    with open(cache_path, "w", encoding="utf-8") as f:
         json.dump(cache, f)
     return cache["token_type"], cache["access_token"]
 

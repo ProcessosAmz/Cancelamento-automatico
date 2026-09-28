@@ -44,7 +44,16 @@ qualquer execução real.
    HUBSOFT_CLIENT_SECRET=...
    HUBSOFT_USERNAME=...
    HUBSOFT_PASSWORD=...
+
+   HUBSOFT_MANIA_BASE_URL=...
+   HUBSOFT_MANIA_CLIENT_ID=...
+   HUBSOFT_MANIA_CLIENT_SECRET=...
+   HUBSOFT_MANIA_USERNAME=...
+   HUBSOFT_MANIA_PASSWORD=...
    ```
+   As linhas `HUBSOFT_*` são da Amazonet e as `HUBSOFT_MANIA_*` são da Mania
+   (cada empresa tem seu próprio HubSoft). Os IDs internos de cada HubSoft
+   (tipo de atendimento, fila, motivo etc.) ficam em `empresas.py`.
    Esse arquivo é secreto: nunca envie por e-mail/WhatsApp nem suba pro Git
    (ele já está configurado pra ser ignorado pelo `.gitignore`).
 
@@ -62,7 +71,9 @@ Toda vez que for usar, só repete estes passos (não precisa reinstalar nada):
    streamlit run app_validacao.py
    ```
 4. O navegador abre sozinho em `http://localhost:8501` com a tela. Se não
-   abrir automaticamente, copie esse endereço e cole no navegador.
+   abrir automaticamente, copie esse endereço e cole no navegador. No topo do
+   menu lateral, escolha a **Empresa**: **Amazonet** ou **Mania** (a tela
+   inteira passa a mostrar só os dados e o HubSoft daquela empresa).
 5. Para encerrar, feche a aba do navegador e depois feche (ou aperte
    `Ctrl+C`) a janela do terminal.
 

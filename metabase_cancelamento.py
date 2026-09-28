@@ -24,37 +24,33 @@ import os
 import urllib.request
 from datetime import datetime
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-
-DEFAULT_METABASE_PUBLIC_URL = (
-    "https://amazonet.hubsoft.com.br:8443/public/question/"
-    "e219a17c-b395-41c9-a7c2-31697dfc1276"
-)
+import empresas
+import hubsoft as h
 
 REGRA_FAIXA = "ATINGIU 75 DIAS"
 CONTRATO_ASSINADO = "CONTRATO ASSINADO"
 LIMIAR_DIAS_REGRA = 75
 
 
-def _metabase_url():
-    if os.environ.get("METABASE_PUBLIC_URL"):
-        return os.environ["METABASE_PUBLIC_URL"]
-    env_path = os.path.join(HERE, ".env")
-    if os.path.exists(env_path):
-        with open(env_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("METABASE_PUBLIC_URL="):
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return DEFAULT_METABASE_PUBLIC_URL
+def _metabase_url(empresa):
+    """URL da consulta publica da empresa: variavel de ambiente ou .env (nome
+    em empresas.py, ex: mania_metabase) e, se nao tiver, a URL padrao."""
+    cfg = empresas.get(empresa)
+    nome = cfg["metabase_env"]
+    return os.environ.get(nome) or h.read_env().get(nome) or cfg["metabase_url_padrao"]
 
 
-def baixar_linhas_metabase(timeout=90):
+def baixar_linhas_metabase(empresa="amazonet", timeout=90):
     """Baixa o export JSON da consulta publica (1 linha por id_cliente_servico)."""
-    url = _metabase_url().rstrip("/") + ".json"
+    url = _metabase_url(empresa).rstrip("/") + ".json"
     with urllib.request.urlopen(url, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8")
-    return json.loads(raw)
+    linhas = json.loads(raw)
+    for r in linhas:
+        # consulta da Mania chama a coluna de valor_mensal_contratado
+        if "valor_mensal" not in r and "valor_mensal_contratado" in r:
+            r["valor_mensal"] = r["valor_mensal_contratado"]
+    return linhas
 
 
 def _dias_desde(data_iso):
@@ -102,8 +98,8 @@ def mapeia_servico(row):
     }
 
 
-def carregar_servicos_suspensos():
-    linhas = baixar_linhas_metabase()
+def carregar_servicos_suspensos(empresa="amazonet"):
+    linhas = baixar_linhas_metabase(empresa)
     return [mapeia_servico(r) for r in linhas]
 
 

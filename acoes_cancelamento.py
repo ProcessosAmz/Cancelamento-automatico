@@ -14,6 +14,7 @@ Fluxo novo (abrir_atendimento_retirada): abre o atendimento especifico de
 confirmados com a Ana em 22/09/2026 testando contra o HubSoft de verdade -
 ver rotas_automacao_hubsoft.json para o historico dos testes.
 """
+import copy
 import json
 import os
 import sys
@@ -22,29 +23,20 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import automacao_cancelamento as ac
+import empresas
 import hubsoft as h
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SAIDAS_DIR = os.path.join(HERE, "saidas")
 
-# Confirmados via teste real em 22/09/2026 (POST /api/v1/integracao/atendimento
-# com id_cliente_servico=264046, cliente IDALIANA PEREIRA BARBOSA).
-ID_TIPO_ATENDIMENTO_RETIRADA = 288  # "RETIRADA DE EQUIPAMENTOS"
-ID_USUARIO_RESPONSAVEL_RETIRADA = 1273  # FILA_AMZ_AGENDAMENTO (amzagendamento@amazonett.com.br)
-ID_ATENDIMENTO_STATUS_INICIAL = 1
-
-# Confirmados via teste real em 22/09/2026 (POST .../ordem_servico/abrir_os
-# com id_atendimento=3042908).
-ID_TIPO_ORDEM_SERVICO_RETIRADA = 3  # "RETIRADA DE EQUIPAMENTOS"
-ID_TECNICO_RETIRADA = ID_USUARIO_RESPONSAVEL_RETIRADA  # mesma FILA_AMZ_AGENDAMENTO
-
-# Confirmados via CANCELAMENTO REAL em 25/09/2026 (cliente 79593, protocolo
-# de cancelamento 132590) - ver rotas_automacao_hubsoft.json.
-ID_MOTIVO_CANCELAMENTO_AUTOMATICO = 67  # "Cancelamento Automatico"
-ID_PRIORIDADE_OS_RETIRADA = 3
-ID_PERIODO_DIA_MANHA = 1
-ID_PERIODO_DIA_TARDE = 2
-
+# IDs da Amazonet (o corpo de cada empresa fica em empresas.py) - usados
+# pelos fluxos antigos abaixo, que so rodam na Amazonet.
+_CORPO_AMZ = empresas.get("amazonet")["corpo_cancelamento_fixo"]
+ID_TIPO_ATENDIMENTO_RETIRADA = _CORPO_AMZ["atendimento"]["tipo_atendimento"]["id_tipo_atendimento"]
+ID_USUARIO_RESPONSAVEL_RETIRADA = _CORPO_AMZ["atendimento"]["usuarios_responsaveis"][0]["id"]
+ID_ATENDIMENTO_STATUS_INICIAL = _CORPO_AMZ["atendimento"]["atendimento_status"]["id_atendimento_status"]
+ID_TIPO_ORDEM_SERVICO_RETIRADA = empresas.get("amazonet")["id_tipo_ordem_servico_retirada"]
+ID_TECNICO_RETIRADA = _CORPO_AMZ["ordem_servico"]["tecnicos"][0]["id"]
 
 def montar_corpo_cancelamento(
     id_cliente_servico,
@@ -58,6 +50,7 @@ def montar_corpo_cancelamento(
     gerar_multa=False,
     gerar_proporcional=False,
     observacao="Cliente com mais de 75 dias suspenso por debito",
+    empresa="amazonet",
 ):
     """Monta (SEM ENVIAR) o corpo da chamada de cancelamento completo - para
     poder mostrar na tela exatamente o que vai ser mandado antes/depois de
@@ -79,49 +72,97 @@ def montar_corpo_cancelamento(
     automatico da API conta os dias da ULTIMA COBRANCA ate o CANCELAMENTO,
     nao da ultima suspensao, entao nao e o valor real que queremos cobrar.
     Deixamos False aqui e geramos a fatura proporcional numa chamada
-    separada (gerar_fatura_proporcional), com o nosso valor fixo de 37 dias."""
-    return {
-        "id_cliente_servico": int(id_cliente_servico),
-        "motivo_cancelamento": {"id_motivo_cancelamento": ID_MOTIVO_CANCELAMENTO_AUTOMATICO},
-        "empresa": {"id_empresa": int(id_empresa)},
-        "observacao": observacao,
-        "cancelar_fatura_pendente": True,
-        "gerar_fatura": True,
-        "gerar_multa": bool(gerar_multa),
-        "gerar_proporcional": bool(gerar_proporcional),
-        "abrir_os_retirada": True,
-        "desautorizar_cpe": True,
-        "remover_porta": False,
-        "tipo_calculo": "automatico",
-        "data_vencimento": data_vencimento,
-        "data_referencia_calculo_proporcional": None,
-        "faturas": [{"id_fatura": int(x)} for x in ids_fatura_cancelar],
-        "atendimento": {
-            "tipo_atendimento": {"id_tipo_atendimento": ID_TIPO_ATENDIMENTO_RETIRADA},
-            "descricao_abertura": descricao_abertura_atendimento,
-            "nome_contato": nome_contato,
-            "telefone_contato": telefone_contato,
-            "email_contato": email_contato,
-            "atendimento_status": {"id_atendimento_status": ID_ATENDIMENTO_STATUS_INICIAL},
-            "usuarios_responsaveis": [{"id": ID_USUARIO_RESPONSAVEL_RETIRADA}],
+    separada (gerar_fatura_proporcional), com o nosso valor fixo de 37 dias.
+
+    empresa: chave de empresas.py - os campos FIXOS vem de
+    corpo_cancelamento_fixo da empresa; aqui so preenchemos os variaveis
+    (empresas.CAMPOS_VARIAVEIS)."""
+    corpo = copy.deepcopy(empresas.get(empresa)["corpo_cancelamento_fixo"])
+    corpo["id_cliente_servico"] = int(id_cliente_servico)
+    corpo["empresa"] = {"id_empresa": int(id_empresa)}
+    corpo["observacao"] = observacao
+    corpo["gerar_multa"] = bool(gerar_multa)
+    corpo["gerar_proporcional"] = bool(gerar_proporcional)
+    corpo["data_vencimento"] = data_vencimento
+    corpo["faturas"] = [{"id_fatura": int(x)} for x in ids_fatura_cancelar]
+    corpo["atendimento"].update(
+        descricao_abertura=descricao_abertura_atendimento,
+        nome_contato=nome_contato,
+        telefone_contato=telefone_contato,
+        email_contato=email_contato,
+    )
+    corpo["ordem_servico"].update(
+        data_inicio_programado=data_vencimento,
+        data_termino_programado=data_vencimento,
+    )
+    if empresas.get(empresa)["os_retirada"] == "separada":
+        # atendimento + O.S. saem depois, em abrir_retirada_separada
+        corpo["abrir_os_retirada"] = False
+        for campo in ("atendimento", "ordem_servico", "descricao_os_retirada"):
+            corpo.pop(campo)
+    return corpo
+
+
+def abrir_retirada_separada(keys, empresa, id_cliente_servico, nome, telefone, descricao):
+    """ACAO REAL, so pra empresa com os_retirada="separada" (Mania): depois do
+    cancelamento, abre o atendimento de retirada e a O.S. vinculada pelas
+    rotas de integracao - a O.S. fica "aguardando_agendamento" sem data
+    marcada, pro setor de agendamento montar a rota. Mesmos IDs do
+    corpo_cancelamento_fixo da empresa. Confirmado no Postman em 28/09/2026
+    (Mania, cliente 36107: atendimento 434384, O.S. 155132).
+
+    abrir_os vai no corpo JSON porque o HubSoft exige booleano de verdade
+    (na query string "false" vira texto e e recusado).
+    Retorna dict com status/resposta de cada passo e ok=True so se os dois
+    passaram."""
+    fixo = empresas.get(empresa)["corpo_cancelamento_fixo"]
+    at = fixo["atendimento"]
+    resultado = {"ok": False, "atendimento": None, "ordem_servico": None}
+    if not telefone:
+        resultado["erro"] = "cliente sem telefone cadastrado (obrigatorio pra abrir o atendimento)"
+        return resultado
+
+    status_at, resp_at = h.api_call(
+        keys,
+        "POST",
+        "/api/v1/integracao/atendimento",
+        body={
+            "id_cliente_servico": int(id_cliente_servico),
+            "id_tipo_atendimento": at["tipo_atendimento"]["id_tipo_atendimento"],
+            "id_usuario_responsavel": at["usuarios_responsaveis"][0]["id"],
+            "id_atendimento_status": at["atendimento_status"]["id_atendimento_status"],
+            "nome": nome,
+            "telefone": telefone,
+            "descricao": descricao,
+            "abrir_os": False,
         },
-        "descricao_os_retirada": "Equipamentos no momento do cancelamento",
-        "ordem_servico": {
-            "status": "aguardando_agendamento",
-            "duracao": "01:00:00",
-            "data_inicio_programado": data_vencimento,
-            "data_termino_programado": data_vencimento,
-            "hora_inicio_programado": "09:00:00",
-            "hora_termino_programado": "18:00:00",
-            "descricao_servico": ac.DESCRICAO_RETIRADA,
-            "tecnicos": [{"id": ID_TECNICO_RETIRADA}],
-            "disponibilidade": [
-                {"id_periodo_dia": ID_PERIODO_DIA_MANHA},
-                {"id_periodo_dia": ID_PERIODO_DIA_TARDE},
-            ],
-            "prioridade": {"id_prioridade": ID_PRIORIDADE_OS_RETIRADA},
+    )
+    resultado["atendimento"] = (status_at, resp_at)
+    atendimento = resp_at.get("atendimento") if isinstance(resp_at, dict) else None
+    id_atendimento = (atendimento or {}).get("id_atendimento")
+    if not (isinstance(resp_at, dict) and resp_at.get("status") == "success" and id_atendimento):
+        resultado["erro"] = "falha ao abrir o atendimento de retirada"
+        return resultado
+    resultado["id_atendimento"] = id_atendimento
+    resultado["protocolo_atendimento"] = atendimento.get("protocolo")
+
+    status_os, resp_os = h.api_call(
+        keys,
+        "POST",
+        "/api/v1/integracao/ordem_servico/abrir_os",
+        params={
+            "id_atendimento": int(id_atendimento),
+            "id_tipo_ordem_servico": fixo["ordem_servico"]["tipo_ordem_servico"]["id_tipo_ordem_servico"],
+            "tecnicos[0][id]": fixo["ordem_servico"]["tecnicos"][0]["id"],
         },
-    }
+    )
+    resultado["ordem_servico"] = (status_os, resp_os)
+    if not (isinstance(resp_os, dict) and resp_os.get("status") == "success"):
+        resultado["erro"] = f"atendimento {id_atendimento} aberto, mas a O.S. falhou"
+        return resultado
+    resultado["id_ordem_servico"] = (resp_os.get("ordem_servico") or {}).get("id_ordem_servico")
+    resultado["ok"] = True
+    return resultado
 
 
 def cancelar_servico_completo(
@@ -137,6 +178,7 @@ def cancelar_servico_completo(
     gerar_multa=False,
     gerar_proporcional=False,
     observacao="Cliente com mais de 75 dias suspenso por debito",
+    empresa="amazonet",
 ):
     """ACAO REAL COMPLETA DE CANCELAMENTO: endpoint OFICIAL usado pela
     propria tela "Cancelamento do Servico" do painel HubSoft
@@ -160,7 +202,16 @@ def cancelar_servico_completo(
     o nosso valor fixo de 37 dias - gerar a fatura proporcional depois, numa
     chamada separada (gerar_fatura_proporcional).
     Retorna (status, resposta, corpo_enviado) - o corpo e devolvido junto
-    pra quem chamou poder exibir/logar exatamente o que foi mandado."""
+    pra quem chamou poder exibir/logar exatamente o que foi mandado.
+
+    empresa: chave de empresas.py - os keys passados tem que ser da mesma
+    empresa (h.load_keys(empresa)). Recusa se faltar algum campo fixo da empresa."""
+    faltando = empresas.ids_faltando(empresa)
+    if faltando:
+        raise ValueError(
+            f"Campos fixos do corpo de cancelamento da empresa '{empresa}' sem valor em empresas.py: "
+            + ", ".join(k for k, _ in faltando)
+        )
     corpo = montar_corpo_cancelamento(
         id_cliente_servico,
         id_empresa,
@@ -173,13 +224,14 @@ def cancelar_servico_completo(
         gerar_multa=gerar_multa,
         gerar_proporcional=gerar_proporcional,
         observacao=observacao,
+        empresa=empresa,
     )
     status, resp = h.api_call(
         keys,
         "POST",
         "/api/v1/cliente/servico/protocolo_cancelamento",
         params={
-            "id_motivo_cancelamento": ID_MOTIVO_CANCELAMENTO_AUTOMATICO,
+            "id_motivo_cancelamento": corpo["motivo_cancelamento"]["id_motivo_cancelamento"],
             "id_cliente_servico": int(id_cliente_servico),
         },
         body=corpo,

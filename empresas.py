@@ -43,8 +43,10 @@ EMPRESAS = {
         ),
         "fila_agendamento": "FILA_AMZ_AGENDAMENTO",
         # multa (valor_multa_estimado) e id_empresa vem prontos da consulta.
-        # Meses restantes de fidelidade = 13 - faturas pagas (Ana, 26/09/2026)
-        "meses_restantes_por": "qtd_faturas_pagas",
+        # Meses restantes de fidelidade = 13 - mes_cancelamento da consulta,
+        # a mesma conta que a consulta usa pro valor da multa (29/09/2026;
+        # antes era 13 - faturas pagas, que nao batia com o valor cobrado)
+        "meses_restantes_por": "mes_cancelamento",
         # atendimento + O.S. de retirada abertos pela propria chamada de
         # cancelamento (corpo_cancelamento_fixo.atendimento/ordem_servico)
         "os_retirada": "junto",

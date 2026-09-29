@@ -10,9 +10,11 @@ agregacao), entao acompanha qualquer coluna que o Metabase estiver expondo.
 
 Rodar com: streamlit run app_validacao.py
 """
+import json
 import os
 import sys
-from datetime import datetime, timedelta
+import time
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
@@ -25,6 +27,15 @@ import hubsoft as h
 import metabase_cancelamento as mb
 
 st.set_page_config(page_title="Cancelamento automatico", layout="wide")
+
+# Execucao real em lote: pausa entre um cliente e outro, e quantos
+# cancelamentos seguidos com falha param o lote (erro geral de permissao/API)
+DELAY_LOTE_SEGUNDOS = 10
+MAX_FALHAS_SEGUIDAS = 3
+# clientes por bloco - depois de cada bloco o lote para e espera sua aprovacao
+TAMANHO_BLOCO = 5
+# resultados que geram notificacao e entram no quadro "Precisa de atencao"
+RESULTADOS_ATENCAO = ("FALHOU", "CANCELADO COM PENDENCIA")
 
 
 @st.cache_data(ttl=900, show_spinner="Baixando dados da consulta publica do Metabase...")
@@ -43,8 +54,7 @@ def render(empresa):
     nome = cfg["nome"]
     ids_pendentes = empresas.ids_faltando(empresa)
     # estado da execucao real separado por empresa
-    k_fila = f"exec_real_fila_{empresa}"
-    k_indice = f"exec_real_indice_{empresa}"
+    k_lote = f"exec_real_lote_{empresa}"
 
     st.sidebar.title(f"Validacao de clientes - {nome}")
     if st.sidebar.button("Recarregar dados do Metabase", key=f"recarregar_{empresa}"):
@@ -242,196 +252,237 @@ def render(empresa):
             )
 
         # -----------------------------------------------------------------------
-        # Execucao REAL (cliente por cliente, com confirmacao)
+        # Execucao REAL em blocos (5 clientes, 10s entre cada, aprovacao entre blocos)
         # -----------------------------------------------------------------------
         st.markdown("---")
-        st.subheader("Execucao REAL do cancelamento (cliente por cliente)")
+        st.subheader(f"Execucao REAL do cancelamento (blocos de {TAMANHO_BLOCO})")
         st.error(
             "ATENCAO: isso executa o cancelamento DE VERDADE - cancela faturas, gera "
-            "cobranca/multa, abre atendimento e O.S. reais, desautoriza CPE. Acao real "
-            "e irreversivel por este programa. Processa 1 cliente por vez e espera sua "
-            "confirmacao (revisar o resultado) antes de seguir pro proximo."
+            "cobranca/multa, abre atendimento e O.S. reais, desautoriza CPE. Roda "
+            f"{TAMANHO_BLOCO} clientes por vez ({DELAY_LOTE_SEGUNDOS}s entre um e outro) e para "
+            "pra voce conferir e aprovar o proximo bloco. Acao real e irreversivel por "
+            "este programa. NAO clique em nada nesta pagina enquanto um bloco estiver "
+            "rodando (isso interrompe o bloco)."
         )
 
         if ids_pendentes:
             st.error(
-                f"Execucao REAL bloqueada na {nome}: faltam IDs do HubSoft desta empresa "
-                "em empresas.py - " + "; ".join(f"`{k}` ({d})" for k, d in ids_pendentes)
+                f"Execucao REAL bloqueada na {nome}: campos fixos sem valor em empresas.py - "
+                + "; ".join(f"`{k}`" for k, _ in ids_pendentes)
             )
 
-        if k_fila not in st.session_state:
-            st.session_state[k_fila] = None
-            st.session_state[k_indice] = 0
+        def _salvar_log(lote):
+            with open(lote["log"], "w", encoding="utf-8") as f:
+                json.dump({k: v for k, v in lote.items() if k != "fila"}, f, ensure_ascii=False, indent=2, default=str)
 
-        confirmar_real = st.checkbox(
-            f"Confirmo que quero executar o cancelamento REAL para os {len(df_automacao)} "
-            f"cliente(s) do plano '{plano_automacao}', um por um, revisando cada resultado "
-            "antes de seguir.",
-            key=f"confirmar_real_{empresa}",
-        )
-        if st.button(
-            "Rodar automacao REAL",
-            type="primary",
-            disabled=not confirmar_real or len(df_automacao) == 0 or bool(ids_pendentes),
-            key=f"rodar_real_{empresa}",
-        ):
-            st.session_state[k_fila] = df_automacao.to_dict("records")
-            st.session_state[k_indice] = 0
+        def _rodar_bloco(lote):
+            """Processa os proximos TAMANHO_BLOCO clientes da fila do lote."""
+            keys = h.load_keys(empresa)
+            fila, total = lote["fila"], len(lote["fila"])
+            inicio = lote["posicao"]
+            fim_bloco = min(inicio + TAMANHO_BLOCO, total)
+            lote["blocos"] += 1
+            progresso = st.progress(0.0)
+            status_txt = st.empty()
+            tabela_ao_vivo = st.empty()
+            bloco = []
 
-        if st.session_state[k_fila] is not None:
-            fila = st.session_state[k_fila]
-            idx = st.session_state[k_indice]
-
-            if idx >= len(fila):
-                st.success(f"Fila concluida - {len(fila)} cliente(s) processado(s).")
-                if st.button("Fechar execucao real", key=f"fechar_{empresa}"):
-                    st.session_state[k_fila] = None
-                    st.session_state[k_indice] = 0
-                    st.rerun()
-            else:
-                row = fila[idx]
+            for i in range(inicio, fim_bloco):
+                row = fila[i]
+                n = i + 1
+                status_txt.info(f"[{n}/{total}] Processando {row['cliente']} (servico {row['id_cliente_servico']})...")
                 plano_atual = ac.montar_plano(row, empresa)
-                st.markdown(
-                    f"### Cliente {idx + 1}/{len(fila)}: {row['cliente']} "
-                    f"(servico {row['id_cliente_servico']})"
+                if not plano_atual["elegivel_automacao"]:
+                    resumo = {
+                        "cliente": row.get("cliente"),
+                        "id_cliente_servico": row.get("id_cliente_servico"),
+                        "plano": row.get("plano"),
+                        "resultado": "PULADO (inelegivel)",
+                        "erro": plano_atual["motivo_inelegivel"],
+                    }
+                    detalhe = {}
+                else:
+                    try:
+                        r = acr.executar_cancelamento_real(keys, empresa, row, plano_atual, lote["data_vencimento"])
+                        resumo, detalhe = r["resumo"], r["detalhe"]
+                    except Exception as e:  # noqa: BLE001 - registra e segue pro proximo
+                        resumo = {
+                            "cliente": row.get("cliente"),
+                            "id_cliente_servico": row.get("id_cliente_servico"),
+                            "plano": row.get("plano"),
+                            "resultado": "FALHOU",
+                            "erro": f"excecao: {e}",
+                        }
+                        detalhe = {}
+                resumo = {"#": n, "bloco": lote["blocos"], **resumo}
+                lote["resumos"].append(resumo)
+                lote["detalhes"].append({"id_cliente_servico": row.get("id_cliente_servico"), **detalhe})
+                lote["posicao"] = n
+                bloco.append(resumo)
+                # log gravado a cada cliente (se parar no meio, mostra ate onde foi)
+                _salvar_log(lote)
+
+                tabela_ao_vivo.dataframe(pd.DataFrame(bloco), hide_index=True, use_container_width=True)
+                progresso.progress((n - inicio) / (fim_bloco - inicio))
+
+                if resumo["resultado"] in RESULTADOS_ATENCAO:
+                    st.toast(
+                        f"{resumo['cliente']} ({resumo['id_cliente_servico']}): {resumo['resultado']} - "
+                        f"{(resumo.get('erro') or '')[:150]}",
+                        icon="⚠️" if resumo["resultado"] != "FALHOU" else "🚨",
+                        duration="long",
+                    )
+
+                # trava de seguranca: erro geral (permissao, token, API fora)
+                lote["falhas_seguidas"] = lote["falhas_seguidas"] + 1 if resumo["resultado"] == "FALHOU" else 0
+                if lote["falhas_seguidas"] >= MAX_FALHAS_SEGUIDAS:
+                    lote["interrompido"] = (
+                        f"Lote interrompido apos {MAX_FALHAS_SEGUIDAS} cancelamentos seguidos com "
+                        f"falha (ultimo erro: {resumo.get('erro')}) - provavel erro geral "
+                        "(permissao/token/API). Corrigir e rodar de novo."
+                    )
+                    _salvar_log(lote)
+                    break
+
+                if n < fim_bloco:
+                    status_txt.info(f"[{n}/{total}] {row['cliente']}: {resumo['resultado']} - aguardando {DELAY_LOTE_SEGUNDOS}s...")
+                    time.sleep(DELAY_LOTE_SEGUNDOS)
+
+            status_txt.empty()
+            tabela_ao_vivo.empty()
+            progresso.empty()
+            atencao = sum(r["resultado"] in RESULTADOS_ATENCAO for r in bloco)
+            if lote.get("interrompido"):
+                st.toast(f"Lote INTERROMPIDO no cliente {lote['posicao']}/{total} - veja o motivo na tela.", icon="🛑", duration="infinite")
+            elif lote["posicao"] >= total:
+                st.toast(f"Lote concluido: {total} cliente(s) processado(s).", icon="✅", duration="infinite")
+            else:
+                st.toast(
+                    f"Bloco {lote['blocos']} concluido ({len(bloco)} clientes, {atencao} precisam de atencao) - "
+                    "confira e aprove o proximo.",
+                    icon="✅" if not atencao else "⚠️",
+                    duration="infinite",
                 )
 
-                if not plano_atual["elegivel_automacao"]:
-                    st.warning(f"Pulando - inelegivel: {plano_atual['motivo_inelegivel']}")
-                    if st.button("Continuar (pular este cliente)", key=f"pular_{empresa}_{idx}"):
-                        st.session_state[k_indice] += 1
-                        st.rerun()
-                else:
-                    resultado_key = f"resultado_real_{empresa}_{row['id_cliente_servico']}_{idx}"
-                    if resultado_key not in st.session_state:
-                        keys = h.load_keys(empresa)
-                        data_venc = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
-                        ids_fatura = plano_atual["acoes"]["apagar_faturas_vencidas"]["ids_fatura"]
-                        multa = plano_atual["acoes"]["cobrar_multa_rescisao"]
-                        proporcional = plano_atual["acoes"]["gerar_fatura_proporcional"]
-                        descricao_atendimento = plano_atual["acoes"]["abrir_atendimento_retirada"]["descricao_abertura"]
-                        with st.spinner(f"Executando cancelamento real de {row['cliente']}..."):
-                            # gerar_multa=False e gerar_proporcional=False sempre aqui:
-                            # as duas saem em chamadas separadas depois, com nosso
-                            # valor/descricao proprios, pra nao ficar agrupadas na
-                            # mesma fatura nem usar o calculo automatico da API (que
-                            # conta da ultima cobranca ate o cancelamento, nao da
-                            # ultima suspensao)
-                            status, resp, corpo = acr.cancelar_servico_completo(
-                                keys,
-                                id_cliente_servico=row["id_cliente_servico"],
-                                id_empresa=plano_atual["id_empresa"],
-                                nome_contato=row["cliente"],
-                                telefone_contato=row.get("telefone_cliente") or "",
-                                email_contato=row.get("email_cliente") or "",
-                                ids_fatura_cancelar=ids_fatura,
-                                data_vencimento=data_venc,
-                                descricao_abertura_atendimento=descricao_atendimento,
-                                gerar_multa=False,
-                                gerar_proporcional=False,
-                                empresa=empresa,
-                            )
+        lote = st.session_state.get(k_lote)
+        if (
+            st.session_state.pop(f"rodar_proximo_{empresa}", False)
+            and lote
+            and not lote.get("interrompido")
+            and not lote.get("encerrado")
+            and lote["posicao"] < len(lote["fila"])
+        ):
+            _rodar_bloco(lote)
+        em_andamento = bool(lote) and not lote.get("interrompido") and not lote.get("encerrado") and lote["posicao"] < len(lote["fila"])
 
-                            resultado_multa = None
-                            resultado_proporcional = None
-                            resultado_os = None
-                            sucesso_cancelamento = isinstance(resp, dict) and resp.get("status") == "success"
+        elegiveis = sum(ac.montar_plano(r, empresa)["elegivel_automacao"] for r in df_automacao.to_dict("records"))
+        confirmar_real = st.checkbox(
+            f"Confirmo que quero executar o cancelamento REAL dos {len(df_automacao)} "
+            f"cliente(s) do plano '{plano_automacao}' ({elegiveis} elegivel(is); inelegiveis "
+            f"sao pulados), em blocos de {TAMANHO_BLOCO} com aprovacao entre cada bloco.",
+            key=f"confirmar_real_{empresa}",
+        )
+        if em_andamento:
+            st.info("Ja existe um lote em andamento abaixo - aprove o proximo bloco ou encerre antes de iniciar outro.")
+        if st.button(
+            f"Iniciar lote REAL - primeiro bloco de {min(TAMANHO_BLOCO, len(df_automacao))} de {len(df_automacao)} cliente(s)",
+            type="primary",
+            disabled=not confirmar_real or len(df_automacao) == 0 or bool(ids_pendentes) or em_andamento,
+            key=f"rodar_real_{empresa}",
+        ):
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            os.makedirs(ac.SAIDAS_DIR, exist_ok=True)
+            lote = {
+                "empresa": empresa,
+                "plano": plano_automacao,
+                "executado_por": "anaketllen@amazonett.com.br",
+                "iniciado_em": ts,
+                "log": os.path.join(ac.SAIDAS_DIR, f"execucao_real_{empresa}_{ts}.json"),
+                "data_vencimento": (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d"),
+                "fila": df_automacao.to_dict("records"),
+                "posicao": 0,
+                "blocos": 0,
+                "falhas_seguidas": 0,
+                "interrompido": None,
+                "encerrado": None,
+                "resumos": [],
+                "detalhes": [],
+            }
+            st.session_state[k_lote] = lote
+            _rodar_bloco(lote)
 
-                            if sucesso_cancelamento and cfg["os_retirada"] == "separada":
-                                # Mania: atendimento + O.S. saem fora do cancelamento
-                                # (ver empresas.py, os_retirada)
-                                resultado_os = acr.abrir_retirada_separada(
-                                    keys,
-                                    empresa,
-                                    id_cliente_servico=row["id_cliente_servico"],
-                                    nome=row["cliente"],
-                                    telefone=row.get("telefone_cliente") or "",
-                                    descricao=descricao_atendimento,
-                                )
+        lote = st.session_state.get(k_lote)
+        if lote:
+            total = len(lote["fila"])
+            resumos = pd.DataFrame(lote["resumos"])
+            falta = total - lote["posicao"]
 
-                            if sucesso_cancelamento and proporcional["aplica"]:
-                                status_p, resp_p = acr.gerar_fatura_proporcional(
-                                    keys,
-                                    id_cliente_servico=row["id_cliente_servico"],
-                                    valor=proporcional["valor"],
-                                    descricao=proporcional["descricao"],
-                                    data_vencimento=data_venc,
-                                )
-                                resultado_proporcional = (status_p, resp_p)
-
-                            if sucesso_cancelamento and multa["aplica"]:
-                                status_m, resp_m = acr.gerar_fatura_multa(
-                                    keys,
-                                    id_cliente_servico=row["id_cliente_servico"],
-                                    valor=multa["valor"],
-                                    descricao=multa["descricao"],
-                                    data_vencimento=data_venc,
-                                )
-                                resultado_multa = (status_m, resp_m)
-                        st.session_state[resultado_key] = (status, resp, corpo, resultado_multa, resultado_proporcional, resultado_os)
-
-                    status, resp, corpo, resultado_multa, resultado_proporcional, resultado_os = st.session_state[resultado_key]
-                    sucesso = isinstance(resp, dict) and resp.get("status") == "success"
-
-                    st.write(f"**HTTP {status}**")
-                    if sucesso:
-                        st.success(resp.get("msg", "Sucesso"))
-                        protocolo = resp.get("protocolo_cancelamento") or {}
-                        ids_fatura_enviadas = [f["id_fatura"] for f in corpo["faturas"]]
-                        st.markdown(
-                            f"- **Protocolo de cancelamento:** {protocolo.get('id_protocolo_cancelamento')}\n"
-                            f"- **Faturas informadas para cancelar:** {ids_fatura_enviadas}\n"
+            if lote.get("interrompido"):
+                st.error(lote["interrompido"])
+            elif lote.get("encerrado"):
+                st.warning(lote["encerrado"])
+            elif falta == 0:
+                st.success(f"Lote concluido: {total} cliente(s) processado(s) do plano '{lote['plano']}'.")
+            else:
+                ultimo = resumos[resumos["bloco"] == lote["blocos"]] if len(resumos) else resumos
+                st.markdown(
+                    f"#### Bloco {lote['blocos']} concluido - confira antes de aprovar o proximo\n"
+                    f"Processados {lote['posicao']} de {total} do plano '{lote['plano']}'; faltam {falta}."
+                )
+                st.dataframe(ultimo, hide_index=True, use_container_width=True)
+                atencao_bloco = ultimo[ultimo["resultado"].isin(RESULTADOS_ATENCAO)] if len(ultimo) else ultimo
+                if len(atencao_bloco):
+                    st.warning(
+                        f"**Neste bloco, {len(atencao_bloco)} cliente(s) precisam de atencao:**\n\n"
+                        + "\n".join(
+                            f"- **{r['cliente']}** ({r['id_cliente_servico']}) - {r['resultado']}: {r.get('erro') or ''}"
+                            for r in atencao_bloco.to_dict("records")
                         )
-                    else:
-                        st.error("A chamada NAO teve sucesso - revise antes de continuar.")
+                    )
+                c1, c2 = st.columns(2)
+                prox = min(TAMANHO_BLOCO, falta)
+                aprovar = c1.button(
+                    f"Aprovar e rodar os proximos {prox} ({lote['posicao'] + 1} a {lote['posicao'] + prox} de {total})",
+                    type="primary",
+                    key=f"aprovar_bloco_{empresa}_{lote['blocos']}",
+                )
+                encerrar = c2.button("Encerrar o lote aqui", key=f"encerrar_lote_{empresa}_{lote['blocos']}")
+                if encerrar:
+                    lote["encerrado"] = f"Lote encerrado por voce apos {lote['posicao']} de {total} cliente(s)."
+                    _salvar_log(lote)
+                    st.rerun()
+                if aprovar:
+                    # roda no inicio do proximo rerun (antes de desenhar a lista)
+                    st.session_state[f"rodar_proximo_{empresa}"] = True
+                    st.rerun()
 
-                    if resultado_os is not None:
-                        if resultado_os["ok"]:
-                            st.success(
-                                f"Atendimento {resultado_os.get('id_atendimento')} (protocolo "
-                                f"{resultado_os.get('protocolo_atendimento')}) e O.S. "
-                                f"{resultado_os.get('id_ordem_servico')} de retirada abertos - "
-                                "O.S. aguardando agendamento."
-                            )
-                        else:
-                            st.error(
-                                f"Cliente CANCELADO, mas a retirada FALHOU: {resultado_os.get('erro')} - "
-                                "abrir o atendimento/O.S. manualmente no painel."
-                            )
-                        with st.expander("JSON do atendimento + O.S. de retirada (separados)", expanded=not resultado_os["ok"]):
-                            st.json({
-                                "atendimento": resultado_os["atendimento"][1] if resultado_os["atendimento"] else None,
-                                "ordem_servico": resultado_os["ordem_servico"][1] if resultado_os["ordem_servico"] else None,
-                            })
-
-                    if resultado_proporcional is not None:
-                        status_p, resp_p = resultado_proporcional
-                        sucesso_p = isinstance(resp_p, dict) and resp_p.get("status") == "success"
-                        if sucesso_p:
-                            st.success(f"Fatura proporcional gerada separadamente (HTTP {status_p}).")
-                        else:
-                            st.error(f"Fatura proporcional FALHOU (HTTP {status_p}) - revise abaixo.")
-                        with st.expander("JSON da chamada de fatura proporcional (separada)", expanded=not sucesso_p):
-                            st.json(resp_p)
-
-                    if resultado_multa is not None:
-                        status_m, resp_m = resultado_multa
-                        sucesso_m = isinstance(resp_m, dict) and resp_m.get("status") == "success"
-                        if sucesso_m:
-                            st.success(f"Fatura de multa gerada separadamente (HTTP {status_m}).")
-                        else:
-                            st.error(f"Fatura de multa FALHOU (HTTP {status_m}) - revise abaixo.")
-                        with st.expander("JSON da chamada de multa (separada)", expanded=not sucesso_m):
-                            st.json(resp_m)
-
-                    with st.expander("JSON enviado (corpo do cancelamento)"):
-                        st.json(corpo)
-                    with st.expander("JSON recebido (resposta do cancelamento)", expanded=True):
-                        st.json(resp)
-
-                    if st.button("OK, revisei - rodar o proximo cliente", type="primary", key=f"ok_{empresa}_{idx}"):
-                        st.session_state[k_indice] += 1
-                        st.rerun()
+            st.markdown("---")
+            st.markdown(f"**Todos os processados neste lote ({len(resumos)} de {total})**")
+            contagem = resumos["resultado"].value_counts().to_dict() if len(resumos) else {}
+            st.markdown(" | ".join(f"**{k}:** {v}" for k, v in contagem.items()))
+            if len(resumos):
+                atencao = resumos[resumos["resultado"].isin(RESULTADOS_ATENCAO)]
+                if len(atencao):
+                    st.warning(
+                        f"**Precisa de atencao: {len(atencao)} cliente(s)**\n\n"
+                        + "\n".join(
+                            f"- **{r['cliente']}** ({r['id_cliente_servico']}) - {r['resultado']}: {r.get('erro') or ''}"
+                            for r in atencao.to_dict("records")
+                        )
+                    )
+            st.caption(f"Log completo (corpo enviado e respostas de cada chamada): {lote['log']}")
+            st.dataframe(resumos, hide_index=True, use_container_width=True)
+            st.download_button(
+                "Baixar lista (CSV)",
+                resumos.to_csv(index=False, sep=";").encode("utf-8-sig"),
+                file_name=f"cancelamento_{empresa}_{lote['iniciado_em']}.csv",
+                mime="text/csv",
+                key=f"baixar_lote_{empresa}",
+            )
+            if not (falta and not lote.get("interrompido") and not lote.get("encerrado")):
+                if st.button("Limpar resultado do lote", key=f"limpar_lote_{empresa}"):
+                    del st.session_state[k_lote]
+                    st.rerun()
 
     # ---------------------------------------------------------------------------
     # Tabela (mesmo plano escolhido na automacao acima)

@@ -15,6 +15,7 @@ confirmados com a Ana em 22/09/2026 testando contra o HubSoft de verdade -
 ver rotas_automacao_hubsoft.json para o historico dos testes.
 """
 import copy
+import re
 import json
 import os
 import sys
@@ -390,6 +391,162 @@ def gerar_fatura_multa(keys, id_cliente_servico, valor, descricao, data_vencimen
     proporcional dentro do cancelamento) e, em seguida, chamar esta funcao
     separada pra gerar a fatura da multa."""
     return gerar_fatura_proporcional(keys, id_cliente_servico, valor, descricao, data_vencimento, parcelado)
+
+
+def _ok(resp):
+    return isinstance(resp, dict) and resp.get("status") == "success"
+
+
+_RE_FATURA_COM_NF = re.compile(r"Nosso N\w*mero:\s*(\d+)", re.IGNORECASE)
+
+
+def nosso_numero_fatura_com_nf(msg):
+    """Nosso numero da fatura recusada por ter nota fiscal, lido da mensagem
+    de erro do cancelamento; None se o erro for outro."""
+    if not msg or "nota" not in msg.lower():
+        return None
+    m = _RE_FATURA_COM_NF.search(msg)
+    return m.group(1) if m else None
+
+
+def faturas_pendentes_cliente(keys, id_cliente_servico):
+    """Faturas pendentes do servico (so leitura) - traz id_fatura e
+    nosso_numero, pra achar a fatura que o HubSoft cita pelo nosso numero.
+    Rota oficial GET /api/v1/integracao/cliente/financeiro (confirmada na
+    Mania em 29/09/2026: nosso numero 604539 = id_fatura 754180)."""
+    status, resp = h.api_call(
+        keys,
+        "GET",
+        "/api/v1/integracao/cliente/financeiro",
+        params={"busca": "id_cliente_servico", "termo_busca": int(id_cliente_servico), "apenas_pendente": "sim"},
+    )
+    return (resp.get("faturas") or []) if _ok(resp) else []
+
+
+def executar_cancelamento_real(keys, empresa, row, plano, data_vencimento):
+    """ACAO REAL COMPLETA de 1 cliente, na ordem usada pela tela:
+      1. cancelar_servico_completo (gerar_multa/gerar_proporcional sempre
+         False - as duas saem separadas, com nosso valor/descricao, pra nao
+         agrupar na mesma fatura nem usar o calculo automatico da API, que
+         conta da ultima cobranca e nao da ultima suspensao)
+      2. (empresa com os_retirada="separada") atendimento + O.S. de retirada
+      3. fatura proporcional, se aplica
+      4. fatura de multa, se aplica
+    Os passos 2-4 so rodam se o cancelamento deu certo.
+
+    plano: automacao_cancelamento.montar_plano(row, empresa).
+    Retorna dict com "resumo" (1 linha pra lista de revisao) e "detalhe"
+    (corpo enviado e respostas de cada chamada, pro log de auditoria)."""
+    acoes = plano["acoes"]
+    proporcional = acoes["gerar_fatura_proporcional"]
+    multa = acoes["cobrar_multa_rescisao"]
+    descricao_atendimento = acoes["abrir_atendimento_retirada"]["descricao_abertura"]
+    resumo = {
+        "cliente": row.get("cliente"),
+        "id_cliente_servico": row.get("id_cliente_servico"),
+        "plano": row.get("plano"),
+        "resultado": "FALHOU",
+        "protocolo_cancelamento": None,
+        "faturas_enviadas_p_cancelar": len(acoes["apagar_faturas_vencidas"]["ids_fatura"]),
+        "retirada": None,
+        "fatura_proporcional": "nao aplica",
+        "fatura_multa": "nao aplica",
+        "erro": None,
+    }
+    detalhe = {"tentativas_cancelamento": []}
+
+    # Fatura com nota fiscal emitida nao pode ser apagada no cancelamento (o
+    # HubSoft recusa a chamada inteira: "...foi escolhido para apagar a fatura
+    # (Nosso Numero: X ...) e ela existe as seguintes notas fiscais associadas
+    # a ela..."). Nesse caso tiramos essa fatura da lista e tentamos de novo -
+    # ela fica em aberto pro financeiro/fiscal tratar (29/09/2026).
+    ids_fatura = list(acoes["apagar_faturas_vencidas"]["ids_fatura"])
+    mantidas_nf = []
+    faturas_cliente = None
+    while True:
+        status, resp, corpo = cancelar_servico_completo(
+            keys,
+            id_cliente_servico=row["id_cliente_servico"],
+            id_empresa=plano["id_empresa"],
+            nome_contato=row.get("cliente"),
+            telefone_contato=row.get("telefone_cliente") or "",
+            email_contato=row.get("email_cliente") or "",
+            ids_fatura_cancelar=ids_fatura,
+            data_vencimento=data_vencimento,
+            descricao_abertura_atendimento=descricao_atendimento,
+            gerar_multa=False,
+            gerar_proporcional=False,
+            empresa=empresa,
+        )
+        detalhe["tentativas_cancelamento"].append({"http": status, "corpo": corpo, "resposta": resp})
+        if _ok(resp):
+            break
+        msg = (resp.get("msg") if isinstance(resp, dict) else None) or f"HTTP {status}"
+        nosso_numero = nosso_numero_fatura_com_nf(msg)
+        if nosso_numero is None:
+            resumo["erro"] = msg
+            break
+        if faturas_cliente is None:
+            faturas_cliente = faturas_pendentes_cliente(keys, row["id_cliente_servico"])
+        id_fatura_nf = next(
+            (f["id_fatura"] for f in faturas_cliente if str(f.get("nosso_numero")) == nosso_numero), None
+        )
+        if id_fatura_nf is None or id_fatura_nf not in ids_fatura:
+            resumo["erro"] = f"fatura com nota fiscal (nosso numero {nosso_numero}) nao identificada: {msg}"
+            break
+        ids_fatura.remove(id_fatura_nf)
+        mantidas_nf.append(f"{id_fatura_nf} (nosso numero {nosso_numero})")
+    detalhe["cancelamento"] = detalhe["tentativas_cancelamento"][-1]
+    resumo["faturas_mantidas_por_nf"] = ", ".join(mantidas_nf) or None
+    resumo["faturas_enviadas_p_cancelar"] = len(ids_fatura)
+    if not _ok(resp):
+        return {"resumo": resumo, "detalhe": detalhe}
+
+    resumo["resultado"] = "CANCELADO"
+    resumo["protocolo_cancelamento"] = (resp.get("protocolo_cancelamento") or {}).get("id_protocolo_cancelamento")
+    avisos = []
+    if mantidas_nf:
+        avisos.append(
+            f"fatura(s) {', '.join(mantidas_nf)} NAO apagada(s) por ter nota fiscal - "
+            "ficou em aberto (cancelar a nota e apagar manualmente, se for o caso)"
+        )
+
+    if empresas.get(empresa)["os_retirada"] == "separada":
+        ret = abrir_retirada_separada(
+            keys, empresa, row["id_cliente_servico"], row.get("cliente"),
+            row.get("telefone_cliente") or "", descricao_atendimento,
+        )
+        detalhe["retirada"] = ret
+        if ret["ok"]:
+            resumo["retirada"] = f"atendimento {ret.get('id_atendimento')} / O.S. {ret.get('id_ordem_servico')}"
+        else:
+            resumo["retirada"] = "FALHOU"
+            avisos.append(f"retirada: {ret.get('erro')}")
+    else:
+        resumo["retirada"] = "no cancelamento"
+
+    if proporcional["aplica"]:
+        st_p, resp_p = gerar_fatura_proporcional(
+            keys, row["id_cliente_servico"], proporcional["valor"], proporcional["descricao"], data_vencimento,
+        )
+        detalhe["fatura_proporcional"] = {"http": st_p, "resposta": resp_p}
+        resumo["fatura_proporcional"] = f"R$ {proporcional['valor']:.2f}" if _ok(resp_p) else "FALHOU"
+        if not _ok(resp_p):
+            avisos.append("fatura proporcional falhou")
+
+    if multa["aplica"]:
+        st_m, resp_m = gerar_fatura_multa(
+            keys, row["id_cliente_servico"], multa["valor"], multa["descricao"], data_vencimento,
+        )
+        detalhe["fatura_multa"] = {"http": st_m, "resposta": resp_m}
+        resumo["fatura_multa"] = f"R$ {multa['valor']:.2f}" if _ok(resp_m) else "FALHOU"
+        if not _ok(resp_m):
+            avisos.append("fatura de multa falhou")
+
+    if avisos:
+        resumo["resultado"] = "CANCELADO COM PENDENCIA"
+        resumo["erro"] = "; ".join(avisos)
+    return {"resumo": resumo, "detalhe": detalhe}
 
 
 def apagar_faturas_vencidas(keys, ids_fatura, observacao):

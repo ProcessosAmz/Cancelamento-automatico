@@ -90,9 +90,16 @@ Toda vez que for usar, só repete estes passos (não precisa reinstalar nada):
   fatura proporcional que as substitui, cobrar multa quando aplicável, abrir
   atendimento + O.S. de retirada de equipamento, desautorizar o CPE) — sem
   chamar a API de verdade. Salva um log da simulação em `saidas/`.
-- Botão **"Rodar automação REAL"** (só libera depois de marcar a caixa de
-  confirmação): executa esses passos de verdade no HubSoft, um cliente por
-  vez, esperando você revisar o resultado antes de seguir pro próximo.
+- Botão **"Iniciar lote REAL"** (só libera depois de marcar a caixa de
+  confirmação): executa esses passos de verdade no HubSoft para os clientes
+  do plano selecionado **em blocos de 5** (10 segundos entre um cliente e
+  outro). Depois de cada bloco o lote para e mostra os 5 processados; você
+  confere e clica **"Aprovar e rodar os próximos 5"** (ou **"Encerrar o lote
+  aqui"**). Avisos na tela mostram na hora cada cliente com pendência/falha;
+  no fim fica a lista de todos os processados (com CSV) e o log completo em
+  `saidas/execucao_real_<empresa>_*.json`. Se 3 cancelamentos seguidos
+  falharem (ex: erro de permissão), o lote para sozinho. Não clique em nada
+  na página enquanto um bloco roda — isso interrompe o bloco.
   **Não pode ser desfeito** pelo programa — revise sempre a lista antes.
 
 ## 4. Se der algum erro

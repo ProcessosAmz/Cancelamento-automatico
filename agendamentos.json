@@ -1,0 +1,26 @@
+{
+  "amazonet": {
+    "ativo": false,
+    "horario": "10:00",
+    "dias_semana": [
+      2
+    ],
+    "planos": [
+      "PA_RE_COM FIDELIDADE_ESMERALDA 600 Mbps + SVA"
+    ],
+    "modo": "real",
+    "limite_clientes": 5
+  },
+  "mania": {
+    "ativo": false,
+    "horario": "09:30",
+    "dias_semana": [
+      2
+    ],
+    "planos": [
+      "MAO_RE_COM FIDELIDADE_SUPER 500 Mbps"
+    ],
+    "modo": "real",
+    "limite_clientes": 5
+  }
+}

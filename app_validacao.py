@@ -25,6 +25,7 @@ import automacao_cancelamento as ac
 import empresas
 import hubsoft as h
 import metabase_cancelamento as mb
+import painel_agendamento
 
 st.set_page_config(page_title="Cancelamento automatico", layout="wide")
 
@@ -32,7 +33,7 @@ st.set_page_config(page_title="Cancelamento automatico", layout="wide")
 # cancelamentos seguidos com falha param o lote (erro geral de permissao/API)
 DELAY_LOTE_SEGUNDOS = 10
 MAX_FALHAS_SEGUIDAS = 3
-# clientes por bloco - depois de cada bloco o lote para e espera sua aprovacao
+# clientes por bloco (valor inicial do campo "Clientes por bloco" da tela)
 TAMANHO_BLOCO = 5
 # resultados que geram notificacao e entram no quadro "Precisa de atencao"
 RESULTADOS_ATENCAO = ("FALHOU", "CANCELADO COM PENDENCIA")
@@ -167,14 +168,25 @@ def render(empresa):
     if not planos_da_tabela:
         st.info("Nenhum plano disponivel com os filtros atuais.")
     else:
-        plano_automacao = st.selectbox(
-            "Escolha o plano (lista dinamica, mesma da tabela acima)",
+        planos_automacao = st.multiselect(
+            "Escolha os planos (um ou mais - lista dinamica, mesma da tabela acima)",
             planos_da_tabela,
-            key=f"plano_automacao_{empresa}",
+            default=planos_da_tabela[:1],
+            key=f"planos_automacao_{empresa}",
         )
-        # dinamico: recalcula toda vez que o filtro em cima ou o plano escolhido mudam
-        df_automacao = df_filtrado[df_filtrado["plano"] == plano_automacao].reset_index(drop=True)
-        st.info(f"{len(df_automacao)} cliente(s) do plano '{plano_automacao}' entrarao na simulacao.")
+        # texto dos planos escolhidos, usado nas mensagens/confirmacao/log
+        plano_automacao = " + ".join(planos_automacao) or "(nenhum plano)"
+        # dinamico: recalcula toda vez que o filtro em cima ou os planos escolhidos mudam
+        df_automacao = df_filtrado[df_filtrado["plano"].isin(planos_automacao)].reset_index(drop=True)
+        if not planos_automacao:
+            st.warning("Escolha pelo menos um plano.")
+        else:
+            st.info(
+                f"{len(df_automacao)} cliente(s) de {len(planos_automacao)} plano(s) entrarao na simulacao: "
+                + "; ".join(
+                    f"{p} ({int((df_automacao['plano'] == p).sum())})" for p in planos_automacao
+                )
+            )
 
         if st.button(f"Rodar automacao (simulacao) - {len(df_automacao)} cliente(s)", type="primary"):
             linhas = df_automacao.to_dict("records")
@@ -252,14 +264,14 @@ def render(empresa):
             )
 
         # -----------------------------------------------------------------------
-        # Execucao REAL em blocos (5 clientes, 10s entre cada, aprovacao entre blocos)
+        # Execucao REAL em blocos (N clientes, 10s entre cada, aprovacao entre blocos)
         # -----------------------------------------------------------------------
         st.markdown("---")
-        st.subheader(f"Execucao REAL do cancelamento (blocos de {TAMANHO_BLOCO})")
+        st.subheader("Execucao REAL do cancelamento (em blocos)")
         st.error(
             "ATENCAO: isso executa o cancelamento DE VERDADE - cancela faturas, gera "
             "cobranca/multa, abre atendimento e O.S. reais, desautoriza CPE. Roda "
-            f"{TAMANHO_BLOCO} clientes por vez ({DELAY_LOTE_SEGUNDOS}s entre um e outro) e para "
+            f"um bloco de clientes por vez ({DELAY_LOTE_SEGUNDOS}s entre um e outro) e para "
             "pra voce conferir e aprovar o proximo bloco. Acao real e irreversivel por "
             "este programa. NAO clique em nada nesta pagina enquanto um bloco estiver "
             "rodando (isso interrompe o bloco)."
@@ -271,16 +283,29 @@ def render(empresa):
                 + "; ".join(f"`{k}`" for k, _ in ids_pendentes)
             )
 
+        # quantidade por bloco: vale pro primeiro bloco e pode ser mudada antes
+        # de aprovar cada bloco seguinte
+        tam_bloco = int(st.number_input(
+            "Clientes por bloco",
+            min_value=1,
+            max_value=500,
+            value=TAMANHO_BLOCO,
+            step=1,
+            key=f"tam_bloco_{empresa}",
+            help="Depois de cada bloco o lote para e espera sua aprovacao. Pode mudar entre um bloco e outro.",
+        ))
+
         def _salvar_log(lote):
             with open(lote["log"], "w", encoding="utf-8") as f:
                 json.dump({k: v for k, v in lote.items() if k != "fila"}, f, ensure_ascii=False, indent=2, default=str)
 
         def _rodar_bloco(lote):
-            """Processa os proximos TAMANHO_BLOCO clientes da fila do lote."""
+            """Processa os proximos lote["tamanho_bloco"] clientes da fila do lote."""
             keys = h.load_keys(empresa)
             fila, total = lote["fila"], len(lote["fila"])
             inicio = lote["posicao"]
-            fim_bloco = min(inicio + TAMANHO_BLOCO, total)
+            fim_bloco = min(inicio + lote["tamanho_bloco"], total)
+            lote.setdefault("tamanhos_blocos", []).append(lote["tamanho_bloco"])
             lote["blocos"] += 1
             progresso = st.progress(0.0)
             status_txt = st.empty()
@@ -372,20 +397,21 @@ def render(empresa):
             and not lote.get("encerrado")
             and lote["posicao"] < len(lote["fila"])
         ):
+            lote["tamanho_bloco"] = tam_bloco
             _rodar_bloco(lote)
         em_andamento = bool(lote) and not lote.get("interrompido") and not lote.get("encerrado") and lote["posicao"] < len(lote["fila"])
 
         elegiveis = sum(ac.montar_plano(r, empresa)["elegivel_automacao"] for r in df_automacao.to_dict("records"))
         confirmar_real = st.checkbox(
             f"Confirmo que quero executar o cancelamento REAL dos {len(df_automacao)} "
-            f"cliente(s) do plano '{plano_automacao}' ({elegiveis} elegivel(is); inelegiveis "
-            f"sao pulados), em blocos de {TAMANHO_BLOCO} com aprovacao entre cada bloco.",
+            f"cliente(s) do(s) plano(s) '{plano_automacao}' ({elegiveis} elegivel(is); inelegiveis "
+            f"sao pulados), em blocos de {tam_bloco} com aprovacao entre cada bloco.",
             key=f"confirmar_real_{empresa}",
         )
         if em_andamento:
             st.info("Ja existe um lote em andamento abaixo - aprove o proximo bloco ou encerre antes de iniciar outro.")
         if st.button(
-            f"Iniciar lote REAL - primeiro bloco de {min(TAMANHO_BLOCO, len(df_automacao))} de {len(df_automacao)} cliente(s)",
+            f"Iniciar lote REAL - primeiro bloco de {min(tam_bloco, len(df_automacao))} de {len(df_automacao)} cliente(s)",
             type="primary",
             disabled=not confirmar_real or len(df_automacao) == 0 or bool(ids_pendentes) or em_andamento,
             key=f"rodar_real_{empresa}",
@@ -402,6 +428,7 @@ def render(empresa):
                 "fila": df_automacao.to_dict("records"),
                 "posicao": 0,
                 "blocos": 0,
+                "tamanho_bloco": tam_bloco,
                 "falhas_seguidas": 0,
                 "interrompido": None,
                 "encerrado": None,
@@ -422,12 +449,12 @@ def render(empresa):
             elif lote.get("encerrado"):
                 st.warning(lote["encerrado"])
             elif falta == 0:
-                st.success(f"Lote concluido: {total} cliente(s) processado(s) do plano '{lote['plano']}'.")
+                st.success(f"Lote concluido: {total} cliente(s) processado(s) do(s) plano(s) '{lote['plano']}'.")
             else:
                 ultimo = resumos[resumos["bloco"] == lote["blocos"]] if len(resumos) else resumos
                 st.markdown(
                     f"#### Bloco {lote['blocos']} concluido - confira antes de aprovar o proximo\n"
-                    f"Processados {lote['posicao']} de {total} do plano '{lote['plano']}'; faltam {falta}."
+                    f"Processados {lote['posicao']} de {total} do(s) plano(s) '{lote['plano']}'; faltam {falta}."
                 )
                 st.dataframe(ultimo, hide_index=True, use_container_width=True)
                 atencao_bloco = ultimo[ultimo["resultado"].isin(RESULTADOS_ATENCAO)] if len(ultimo) else ultimo
@@ -440,7 +467,8 @@ def render(empresa):
                         )
                     )
                 c1, c2 = st.columns(2)
-                prox = min(TAMANHO_BLOCO, falta)
+                prox = min(tam_bloco, falta)
+                st.caption("Para mudar o tamanho do proximo bloco, altere \"Clientes por bloco\" acima antes de aprovar.")
                 aprovar = c1.button(
                     f"Aprovar e rodar os proximos {prox} ({lote['posicao'] + 1} a {lote['posicao'] + prox} de {total})",
                     type="primary",
@@ -489,7 +517,7 @@ def render(empresa):
     # ---------------------------------------------------------------------------
     st.markdown("---")
     if planos_da_tabela:
-        st.subheader(f"Clientes do plano selecionado: {plano_automacao}")
+        st.subheader(f"Clientes do(s) plano(s) selecionado(s): {plano_automacao}")
     else:
         st.subheader("Clientes")
     renomeia = {
@@ -566,5 +594,13 @@ empresa_sel = st.sidebar.radio(
     horizontal=True,
     key="empresa_sel",
 )
+tela_sel = st.sidebar.radio("Tela", ["Cancelamento", "Agendamento"], horizontal=True, key="tela_sel")
 st.sidebar.markdown("---")
-render(empresa_sel)
+if tela_sel == "Agendamento":
+    painel_agendamento.render(
+        empresa_sel,
+        empresas.get(empresa_sel)["nome"],
+        sorted(carregar_metabase(empresa_sel)["plano"].dropna().unique()),
+    )
+else:
+    render(empresa_sel)

@@ -102,7 +102,41 @@ Toda vez que for usar, só repete estes passos (não precisa reinstalar nada):
   na página enquanto um bloco roda — isso interrompe o bloco.
   **Não pode ser desfeito** pelo programa — revise sempre a lista antes.
 
-## 4. Se der algum erro
+## 4. Agendamento automático
+
+No menu lateral, em **Tela**, escolha **Agendamento**. Para cada empresa dá
+para configurar: ligar/desligar, **horário** (de Manaus), **dias da semana**,
+**quais planos** rodam, **modo** (Simulação ou REAL) e o **máximo de
+clientes por execução**. Clique em **Salvar agendamento** — fica gravado em
+`agendamentos.json`. A tela mostra a próxima execução e o resultado da
+última (com a lista de quem precisa de atenção).
+
+Quem executa no horário é o **agendador**. O jeito recomendado é registrar
+uma tarefa no **Agendador de Tarefas do Windows** (uma vez só, no terminal
+na pasta do projeto):
+
+```
+powershell -ExecutionPolicy Bypass -File .\instalar_tarefa_agendador.ps1
+```
+
+A tarefa roda `rodar_agendador.bat` a cada 5 minutos (enquanto você estiver
+logada no Windows; pode estar com a tela bloqueada) e grava a saída em
+`saidas\agendador.log`. Para remover:
+`powershell -ExecutionPolicy Bypass -File .\instalar_tarefa_agendador.ps1 -Remover`.
+
+Alternativa sem tarefa: deixar uma segunda janela do terminal aberta com:
+
+```
+venv\Scripts\activate
+python agendador.py
+```
+
+Ele confere a configuração a cada minuto e roda cada empresa uma vez por dia,
+no horário marcado (até 60 minutos depois, se estava desligado na hora
+exata). No modo REAL ele cancela sozinho, sem a aprovação de 5 em 5 da tela —
+comece em **Simulação** e com um limite pequeno de clientes.
+
+## 5. Se der algum erro
 
 - **"streamlit não é reconhecido..."**: o ambiente virtual não está ativado
   — repita o passo `venv\Scripts\activate`.
